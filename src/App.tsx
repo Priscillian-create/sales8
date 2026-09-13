@@ -380,30 +380,42 @@ function App() {
       const prescriptionRows = (prescriptionsResult.data ?? []) as PrescriptionRow[]
       const saleRows = (salesResult.data ?? []) as SaleRow[]
 
-      if (productRows.length > 0) {
-        setInventory(productRows)
-        writeStored('purela.clean.inventory', productRows)
-      }
-      if (customerRows.length > 0) {
-        setCustomers(customerRows)
-        writeStored('purela.customers', customerRows)
-      }
-      if (prescriptionRows.length > 0) {
-        const nextPrescriptions = prescriptionRows.map(rowToPrescription)
-        setPrescriptions(nextPrescriptions)
-        writeStored('purela.clean.prescriptions', nextPrescriptions)
-      }
-      if (saleRows.length > 0) {
-        const nextSales = saleRows.map(rowToSale)
-        setSales(nextSales)
-        writeStored('purela.clean.sales', nextSales)
-      }
+      const nextPrescriptions = prescriptionRows.map(rowToPrescription)
+      const nextSales = saleRows.map(rowToSale)
+
+      setInventory(productRows)
+      setCustomers(customerRows)
+      setPrescriptions(nextPrescriptions)
+      setSales(nextSales)
+      writeStored('purela.clean.inventory', productRows)
+      writeStored('purela.customers', customerRows)
+      writeStored('purela.clean.prescriptions', nextPrescriptions)
+      writeStored('purela.clean.sales', nextSales)
     }
 
     void loadSupabaseData()
 
+    const syncChannel = supabase
+      ?.channel('purela-pos-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => {
+        void loadSupabaseData()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
+        void loadSupabaseData()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'prescriptions' }, () => {
+        void loadSupabaseData()
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => {
+        void loadSupabaseData()
+      })
+      .subscribe()
+
     return () => {
       cancelled = true
+      if (syncChannel) {
+        void supabase?.removeChannel(syncChannel)
+      }
     }
   }, [])
 

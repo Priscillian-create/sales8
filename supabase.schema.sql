@@ -115,6 +115,34 @@ for all to anon, authenticated
 using (true)
 with check (true);
 
+do $$
+begin
+  alter publication supabase_realtime add table products;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table customers;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table prescriptions;
+exception
+  when duplicate_object then null;
+end $$;
+
+do $$
+begin
+  alter publication supabase_realtime add table sales;
+exception
+  when duplicate_object then null;
+end $$;
+
 -- Products intentionally start empty. Add your real pharmacy products from the POS Add Product dashboard.
 
 -- Optional: make the existing Supabase Auth user an Admin profile for the POS.
