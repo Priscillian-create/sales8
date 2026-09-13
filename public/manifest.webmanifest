@@ -1,0 +1,19 @@
+{
+  "name": "PURELA PHARMACY POS",
+  "short_name": "Purela POS",
+  "description": "PURELA PHARMACY point of sale system",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f4f1ed",
+  "theme_color": "#2c3e50",
+  "orientation": "landscape-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
