@@ -843,6 +843,18 @@ h2 {
   gap: 8px;
 }
 
+.inventory-search-row {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.inventory-search {
+  margin: 0;
+}
+
 .queue-row {
   display: grid;
   grid-template-columns: 90px minmax(120px, 1fr) minmax(160px, 1.4fr) 120px 62px 92px;
@@ -1277,6 +1289,7 @@ button.customer-card:hover {
   .product-row,
   .cart-line,
   .queue-row,
+  .inventory-search-row,
   .inventory-row,
   .sale-row,
   .form-grid {

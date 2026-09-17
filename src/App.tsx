@@ -256,6 +256,19 @@ const writeStored = <T,>(key: string, value: T) => {
   window.localStorage.setItem(key, JSON.stringify(value))
 }
 
+const pendingSyncKey = 'purela.pendingSyncTables'
+
+const markPendingSync = (table: string) => {
+  const pending = new Set(readStored<string[]>(pendingSyncKey, []))
+  pending.add(table)
+  writeStored(pendingSyncKey, Array.from(pending))
+}
+
+const clearPendingSync = (table: string) => {
+  const pending = readStored<string[]>(pendingSyncKey, []).filter((item) => item !== table)
+  writeStored(pendingSyncKey, pending)
+}
+
 const formatMoney = (value: number) =>
   new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 2 }).format(value)
 
@@ -318,13 +331,49 @@ const rowToSale = (row: SaleRow): Sale => ({
 })
 
 const syncSupabase = async <T extends { id: number | string }>(table: string, rows: T[]) => {
-  if (!supabase || rows.length === 0) return null
-  return supabase.from(table).upsert(rows, { onConflict: 'id' })
+  if (rows.length === 0) return null
+  if (!supabase || !navigator.onLine) {
+    markPendingSync(table)
+    return null
+  }
+
+  try {
+    const result = await supabase.from(table).upsert(rows, { onConflict: 'id' })
+    if (result.error) {
+      markPendingSync(table)
+    } else {
+      clearPendingSync(table)
+    }
+    return result
+  } catch {
+    markPendingSync(table)
+    return null
+  }
 }
 
 const clearSupabaseTable = async (table: string, textId = false) => {
   if (!supabase) return null
   return supabase.from(table).delete().neq('id', textId ? '' : -1)
+}
+
+const flushPendingSupabaseData = async () => {
+  if (!supabase || !navigator.onLine) return
+
+  const pending = readStored<string[]>(pendingSyncKey, [])
+  if (pending.length === 0) return
+
+  const tasks: Record<string, () => Promise<unknown>> = {
+    products: () => syncSupabase('products', readStored<Medicine[]>('purela.clean.inventory', initialInventory)),
+    customers: () => syncSupabase('customers', readStored<Customer[]>('purela.customers', initialCustomers)),
+    prescriptions: () =>
+      syncSupabase(
+        'prescriptions',
+        readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions).map(prescriptionToRow),
+      ),
+    sales: () => syncSupabase('sales', readStored<Sale[]>('purela.clean.sales', initialSales).map(saleToRow)),
+  }
+
+  await Promise.all(pending.map((table) => tasks[table]?.()))
 }
 
 function App() {
@@ -335,6 +384,7 @@ function App() {
   const [cart, setCart] = useState<CartLine[]>([])
   const [activeTab, setActiveTab] = useState<TabLabel>('Register')
   const [query, setQuery] = useState('')
+  const [inventoryQuery, setInventoryQuery] = useState('')
   const [payment, setPayment] = useState('Cash')
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | 'walk-in'>('walk-in')
   const [lastReceipt, setLastReceipt] = useState<Sale | null>(null)
@@ -359,6 +409,8 @@ function App() {
 
     const loadSupabaseData = async () => {
       if (!supabase) return
+
+      await flushPendingSupabaseData()
 
       const [productsResult, customersResult, prescriptionsResult, salesResult] = await Promise.all([
         supabase.from('products').select('*').order('id'),
@@ -395,6 +447,10 @@ function App() {
 
     void loadSupabaseData()
 
+    const handleOnline = () => {
+      void loadSupabaseData()
+    }
+
     const syncChannel = supabase
       ?.channel('purela-pos-sync')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => {
@@ -411,8 +467,11 @@ function App() {
       })
       .subscribe()
 
+    window.addEventListener('online', handleOnline)
+
     return () => {
       cancelled = true
+      window.removeEventListener('online', handleOnline)
       if (syncChannel) {
         void supabase?.removeChannel(syncChannel)
       }
@@ -461,6 +520,11 @@ function App() {
   const filteredInventory = inventory.filter((item) => {
     const value = `${item.name} ${item.generic} ${item.category} ${item.batch} ${item.location}`.toLowerCase()
     return value.includes(query.toLowerCase())
+  })
+
+  const filteredInventoryRows = inventory.filter((item) => {
+    const value = `${item.name} ${item.generic} ${item.category} ${item.batch} ${item.location} ${item.supplier}`.toLowerCase()
+    return value.includes(inventoryQuery.toLowerCase())
   })
 
   const salesData = useMemo(() => {
@@ -1169,8 +1233,27 @@ function App() {
                   </button>
                 )}
               </div>
+
+              <div className="inventory-search-row">
+                <label className="search-box inventory-search">
+                  <Search size={19} />
+                  <input
+                    value={inventoryQuery}
+                    onChange={(event) => setInventoryQuery(event.target.value)}
+                    placeholder="Search products by name, generic, batch, shelf, supplier..."
+                  />
+                </label>
+                <button className="icon-text" onClick={() => setInventoryQuery('')} type="button">
+                  <Filter size={17} />
+                  Clear
+                </button>
+              </div>
+
               <div className="inventory-table">
-                {inventory.map((item) => (
+                {filteredInventoryRows.length === 0 && (
+                  <div className="empty-state">No products match your inventory search.</div>
+                )}
+                {filteredInventoryRows.map((item) => (
                   <div className="inventory-row" key={item.id}>
                     <div>
                       <strong>{item.name}</strong>
