@@ -274,6 +274,8 @@ const formatMoney = (value: number) =>
 
 const nextId = (items: { id: number }[]) => Math.max(0, ...items.map((item) => item.id)) + 1
 
+const nextOfflineSafeId = () => Date.now() + Math.floor(Math.random() * 1000)
+
 const generateBatchNumber = () => {
   const randomPart = Math.random().toString(36).slice(2, 6).toUpperCase()
   return `PUR-${new Date().getFullYear()}-${randomPart}`
@@ -329,6 +331,23 @@ const rowToSale = (row: SaleRow): Sale => ({
   items: row.items,
   createdAt: row.created_at,
 })
+
+const mergeProducts = (remoteProducts: Medicine[], localProducts: Medicine[]) => {
+  const merged = new Map<string, Medicine>()
+
+  remoteProducts.forEach((product) => {
+    merged.set(product.batch || String(product.id), product)
+  })
+
+  localProducts.forEach((product) => {
+    const key = product.batch || String(product.id)
+    if (!merged.has(key)) {
+      merged.set(key, product)
+    }
+  })
+
+  return Array.from(merged.values()).sort((a, b) => a.id - b.id)
+}
 
 const syncSupabase = async <T extends { id: number | string }>(table: string, rows: T[]) => {
   if (rows.length === 0) return null
@@ -431,15 +450,21 @@ function App() {
       const customerRows = (customersResult.data ?? []) as CustomerRow[]
       const prescriptionRows = (prescriptionsResult.data ?? []) as PrescriptionRow[]
       const saleRows = (salesResult.data ?? []) as SaleRow[]
+      const localProducts = readStored<Medicine[]>('purela.clean.inventory', initialInventory)
+      const mergedProducts = mergeProducts(productRows, localProducts)
 
       const nextPrescriptions = prescriptionRows.map(rowToPrescription)
       const nextSales = saleRows.map(rowToSale)
 
-      setInventory(productRows)
+      if (mergedProducts.length !== productRows.length) {
+        void syncSupabase('products', mergedProducts)
+      }
+
+      setInventory(mergedProducts)
       setCustomers(customerRows)
       setPrescriptions(nextPrescriptions)
       setSales(nextSales)
-      writeStored('purela.clean.inventory', productRows)
+      writeStored('purela.clean.inventory', mergedProducts)
       writeStored('purela.customers', customerRows)
       writeStored('purela.clean.prescriptions', nextPrescriptions)
       writeStored('purela.clean.sales', nextSales)
@@ -740,7 +765,7 @@ function App() {
     const batchNumber = medicineForm.batch.trim() || generateBatchNumber()
 
     const medicine: Medicine = {
-      id: editingProductId ?? nextId(inventory),
+      id: editingProductId ?? nextOfflineSafeId(),
       name: medicineForm.name.trim(),
       generic: medicineForm.generic.trim(),
       category: medicineForm.category.trim(),
