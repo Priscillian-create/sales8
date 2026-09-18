@@ -1451,3 +1451,6 @@ button.customer-card:hover {
   overflow-wrap: anywhere;
   color: #0f766e;
 }
+.metric-strip.inventory-summary {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+}

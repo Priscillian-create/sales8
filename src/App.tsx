@@ -428,6 +428,8 @@ function App() {
   const total = subtotal - discount
 
   const lowStock = inventory.filter((item) => item.stock <= item.reorder)
+  const inventoryValue = inventory.reduce((sum, item) => sum + item.stock * item.price, 0)
+  const inventoryUnits = inventory.reduce((sum, item) => sum + item.stock, 0)
   const expiringSoon = inventory.filter((item) => item.expiry < '2027-01-01')
   const rxFilled = prescriptions.filter((rx) => rx.status === 'Filled' || rx.status === 'Released').length
   const netSales = sales.reduce((sum, sale) => sum + sale.total, 0)
@@ -1133,6 +1135,11 @@ function App() {
 
         {activeTab === 'Inventory' && (
           <section className="module-grid single">
+            <section className="metric-strip inventory-summary" aria-label="Inventory totals">
+              <Metric icon={WalletCards} label="Total inventory value" value={formatMoney(inventoryValue)} trend="All stock × selling price" />
+              <Metric icon={PackageCheck} label="Total units in stock" value={inventoryUnits.toLocaleString('en-NG')} trend="Across all products" />
+              <Metric icon={Pill} label="Total products" value={inventory.length.toLocaleString('en-NG')} trend="All inventory batches" />
+            </section>
             <div className="ops-panel wide">
               <div className="panel-heading">
                 <div>
