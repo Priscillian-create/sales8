@@ -257,6 +257,7 @@ const writeStored = <T,>(key: string, value: T) => {
 }
 
 const pendingSyncKey = 'purela.pendingSyncTables'
+const pendingDeleteKey = 'purela.pendingDeletes'
 
 const markPendingSync = (table: string) => {
   const pending = new Set(readStored<string[]>(pendingSyncKey, []))
@@ -269,10 +270,22 @@ const clearPendingSync = (table: string) => {
   writeStored(pendingSyncKey, pending)
 }
 
+const markPendingDelete = (table: string, id: number | string) => {
+  const pending = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
+  const tableDeletes = new Set(pending[table] ?? [])
+  tableDeletes.add(id)
+  writeStored(pendingDeleteKey, { ...pending, [table]: Array.from(tableDeletes) })
+  markPendingSync(table)
+}
+
+const clearPendingDelete = (table: string, id: number | string) => {
+  const pending = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
+  const tableDeletes = (pending[table] ?? []).filter((item) => item !== id)
+  writeStored(pendingDeleteKey, { ...pending, [table]: tableDeletes })
+}
+
 const formatMoney = (value: number) =>
   new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 2 }).format(value)
-
-const nextId = (items: { id: number }[]) => Math.max(0, ...items.map((item) => item.id)) + 1
 
 const nextOfflineSafeId = () => Date.now() + Math.floor(Math.random() * 1000)
 
@@ -332,22 +345,49 @@ const rowToSale = (row: SaleRow): Sale => ({
   createdAt: row.created_at,
 })
 
-const mergeProducts = (remoteProducts: Medicine[], localProducts: Medicine[]) => {
-  const merged = new Map<string, Medicine>()
+const mergeByKey = <T,>(
+  remoteRows: T[],
+  localRows: T[],
+  getKey: (row: T) => string,
+  pendingDeletes: Array<number | string> = [],
+  localWins = true,
+) => {
+  const deleted = new Set(pendingDeletes.map(String))
+  const merged = new Map<string, T>()
 
-  remoteProducts.forEach((product) => {
-    merged.set(product.batch || String(product.id), product)
-  })
-
-  localProducts.forEach((product) => {
-    const key = product.batch || String(product.id)
-    if (!merged.has(key)) {
-      merged.set(key, product)
+  remoteRows.forEach((row) => {
+    if (!deleted.has(getKey(row))) {
+      merged.set(getKey(row), row)
     }
   })
 
-  return Array.from(merged.values()).sort((a, b) => a.id - b.id)
+  localRows.forEach((row) => {
+    if (!deleted.has(getKey(row))) {
+      if (localWins || !merged.has(getKey(row))) {
+        merged.set(getKey(row), row)
+      }
+    }
+  })
+
+  return Array.from(merged.values())
 }
+
+const mergeProducts = (remoteProducts: Medicine[], localProducts: Medicine[], pendingDeletes: Array<number | string> = [], localWins = true) => {
+  const deleted = new Set(pendingDeletes.map(String))
+  const activeRemote = remoteProducts.filter((product) => !deleted.has(String(product.id)) && !deleted.has(product.batch))
+  const activeLocal = localProducts.filter((product) => !deleted.has(String(product.id)) && !deleted.has(product.batch))
+
+  return mergeByKey(activeRemote, activeLocal, (product) => product.batch || String(product.id), [], localWins).sort((a, b) => a.name.localeCompare(b.name))
+}
+
+const mergeCustomers = (remoteCustomers: Customer[], localCustomers: Customer[], localWins = true) =>
+  mergeByKey(remoteCustomers, localCustomers, (customer) => String(customer.id), [], localWins).sort((a, b) => a.name.localeCompare(b.name))
+
+const mergePrescriptions = (remotePrescriptions: Prescription[], localPrescriptions: Prescription[], localWins = true) =>
+  mergeByKey(remotePrescriptions, localPrescriptions, (prescription) => prescription.id, [], localWins)
+
+const mergeSales = (remoteSales: Sale[], localSales: Sale[], localWins = true) =>
+  mergeByKey(remoteSales, localSales, (sale) => sale.id, [], localWins).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
 
 const syncSupabase = async <T extends { id: number | string }>(table: string, rows: T[]) => {
   if (rows.length === 0) return null
@@ -376,10 +416,12 @@ const clearSupabaseTable = async (table: string, textId = false) => {
 }
 
 const flushPendingSupabaseData = async () => {
-  if (!supabase || !navigator.onLine) return
+  const client = supabase
+  if (!client || !navigator.onLine) return
 
   const pending = readStored<string[]>(pendingSyncKey, [])
   if (pending.length === 0) return
+  const pendingDeletes = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
 
   const tasks: Record<string, () => Promise<unknown>> = {
     products: () => syncSupabase('products', readStored<Medicine[]>('purela.clean.inventory', initialInventory)),
@@ -392,7 +434,24 @@ const flushPendingSupabaseData = async () => {
     sales: () => syncSupabase('sales', readStored<Sale[]>('purela.clean.sales', initialSales).map(saleToRow)),
   }
 
-  await Promise.all(pending.map((table) => tasks[table]?.()))
+  await Promise.all(
+    pending.map(async (table) => {
+      await tasks[table]?.()
+
+      if (pendingDeletes[table]?.length) {
+        await Promise.all(
+          pendingDeletes[table].map(async (id) => {
+            const result = await client.from(table).delete().eq('id', id)
+            if (!result.error) {
+              clearPendingDelete(table, id)
+            } else {
+              markPendingSync(table)
+            }
+          }),
+        )
+      }
+    }),
+  )
 }
 
 function App() {
@@ -450,24 +509,40 @@ function App() {
       const customerRows = (customersResult.data ?? []) as CustomerRow[]
       const prescriptionRows = (prescriptionsResult.data ?? []) as PrescriptionRow[]
       const saleRows = (salesResult.data ?? []) as SaleRow[]
+      const pendingTables = readStored<string[]>(pendingSyncKey, [])
+      const pendingDeletes = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
       const localProducts = readStored<Medicine[]>('purela.clean.inventory', initialInventory)
-      const mergedProducts = mergeProducts(productRows, localProducts)
+      const localCustomers = readStored<Customer[]>('purela.customers', initialCustomers)
+      const localPrescriptions = readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions)
+      const localSales = readStored<Sale[]>('purela.clean.sales', initialSales)
+      const remotePrescriptions = prescriptionRows.map(rowToPrescription)
+      const remoteSales = saleRows.map(rowToSale)
+      const mergedProducts = mergeProducts(productRows, localProducts, pendingDeletes.products, pendingTables.includes('products'))
+      const mergedCustomers = mergeCustomers(customerRows, localCustomers, pendingTables.includes('customers'))
+      const mergedPrescriptions = mergePrescriptions(remotePrescriptions, localPrescriptions, pendingTables.includes('prescriptions'))
+      const mergedSales = mergeSales(remoteSales, localSales, pendingTables.includes('sales'))
 
-      const nextPrescriptions = prescriptionRows.map(rowToPrescription)
-      const nextSales = saleRows.map(rowToSale)
-
-      if (mergedProducts.length !== productRows.length) {
+      if (mergedProducts.length !== productRows.length || pendingTables.includes('products')) {
         void syncSupabase('products', mergedProducts)
+      }
+      if (mergedCustomers.length !== customerRows.length || pendingTables.includes('customers')) {
+        void syncSupabase('customers', mergedCustomers)
+      }
+      if (mergedPrescriptions.length !== remotePrescriptions.length || pendingTables.includes('prescriptions')) {
+        void syncSupabase('prescriptions', mergedPrescriptions.map(prescriptionToRow))
+      }
+      if (mergedSales.length !== remoteSales.length || pendingTables.includes('sales')) {
+        void syncSupabase('sales', mergedSales.map(saleToRow))
       }
 
       setInventory(mergedProducts)
-      setCustomers(customerRows)
-      setPrescriptions(nextPrescriptions)
-      setSales(nextSales)
+      setCustomers(mergedCustomers)
+      setPrescriptions(mergedPrescriptions)
+      setSales(mergedSales)
       writeStored('purela.clean.inventory', mergedProducts)
-      writeStored('purela.customers', customerRows)
-      writeStored('purela.clean.prescriptions', nextPrescriptions)
-      writeStored('purela.clean.sales', nextSales)
+      writeStored('purela.customers', mergedCustomers)
+      writeStored('purela.clean.prescriptions', mergedPrescriptions)
+      writeStored('purela.clean.sales', mergedSales)
     }
 
     void loadSupabaseData()
@@ -648,7 +723,7 @@ function App() {
     }
 
     const sale: Sale = {
-      id: `SALE-${Date.now().toString().slice(-6)}`,
+      id: `SALE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
       patient: selectedCustomer?.name ?? 'Walk-in customer',
       cashier: cashierName,
       payment,
@@ -726,8 +801,18 @@ function App() {
 
     const nextInventory = inventory.filter((item) => item.id !== medicine.id)
     persistInventory(nextInventory)
-    if (supabase) {
-      void supabase.from('products').delete().eq('id', medicine.id)
+    if (supabase && navigator.onLine) {
+      void supabase
+        .from('products')
+        .delete()
+        .eq('id', medicine.id)
+        .then((result) => {
+          if (result.error) {
+            markPendingDelete('products', medicine.id)
+          }
+        })
+    } else {
+      markPendingDelete('products', medicine.id)
     }
     setCart((current) => current.filter((item) => item.id !== medicine.id))
     setToast(`${medicine.name} deleted from inventory.`)
@@ -799,7 +884,7 @@ function App() {
     }
 
     const customer: Customer = {
-      id: nextId(customers),
+      id: nextOfflineSafeId(),
       name: customerForm.name,
       phone: customerForm.phone,
       plan: customerForm.plan || 'Private pay',
