@@ -1,4 +1,4 @@
-const CACHE_NAME = 'purela-pharmacy-pos-v2'
+const CACHE_NAME = 'purela-pharmacy-pos-v3'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './supabase-config.js']
 
 self.addEventListener('install', (event) => {
