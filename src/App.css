@@ -1445,3 +1445,9 @@ button.customer-card:hover {
     font-size: 12px;
   }
 }
+.sync-status {
+  max-width: 320px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  color: #0f766e;
+}

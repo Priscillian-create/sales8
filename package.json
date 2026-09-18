@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test": "tsc --ignoreConfig src/offline-store.ts --outDir .test-build --target ES2023 --module NodeNext --skipLibCheck && node --test tests/offline-store.test.mjs tests/service-worker.test.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

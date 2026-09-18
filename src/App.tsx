@@ -42,6 +42,8 @@ import {
   YAxis,
 } from 'recharts'
 import { isSupabaseConfigured, supabase } from './supabase'
+import { OfflineStore } from './offline-store'
+import type { Transport, Row } from './offline-store'
 import './App.css'
 
 type BeforeInstallPromptEvent = Event & {
@@ -128,10 +130,6 @@ type LoginForm = {
   password: string
 }
 
-type ProductRow = Medicine
-
-type CustomerRow = Customer
-
 type PrescriptionRow = {
   id: string
   patient_id: number
@@ -161,12 +159,6 @@ type ProfileRow = {
 }
 
 const initialInventory: Medicine[] = []
-
-const initialCustomers: Customer[] = [
-  { id: 1, name: 'Grace Miller', phone: '(555) 018-4491', plan: 'Aetna Rx', allergies: 'Penicillin', last: 'New customer profile', status: 'Due today' },
-  { id: 2, name: 'Daniel Brooks', phone: '(555) 013-9240', plan: 'Private pay', allergies: 'None recorded', last: 'Blood pressure check', status: 'Ready' },
-  { id: 3, name: 'Maya Chen', phone: '(555) 019-3044', plan: 'BlueCross', allergies: 'Sulfa', last: 'New customer profile', status: 'Needs consult' },
-]
 
 const initialPrescriptions: Prescription[] = []
 
@@ -256,34 +248,6 @@ const writeStored = <T,>(key: string, value: T) => {
   window.localStorage.setItem(key, JSON.stringify(value))
 }
 
-const pendingSyncKey = 'purela.pendingSyncTables'
-const pendingDeleteKey = 'purela.pendingDeletes'
-
-const markPendingSync = (table: string) => {
-  const pending = new Set(readStored<string[]>(pendingSyncKey, []))
-  pending.add(table)
-  writeStored(pendingSyncKey, Array.from(pending))
-}
-
-const clearPendingSync = (table: string) => {
-  const pending = readStored<string[]>(pendingSyncKey, []).filter((item) => item !== table)
-  writeStored(pendingSyncKey, pending)
-}
-
-const markPendingDelete = (table: string, id: number | string) => {
-  const pending = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
-  const tableDeletes = new Set(pending[table] ?? [])
-  tableDeletes.add(id)
-  writeStored(pendingDeleteKey, { ...pending, [table]: Array.from(tableDeletes) })
-  markPendingSync(table)
-}
-
-const clearPendingDelete = (table: string, id: number | string) => {
-  const pending = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
-  const tableDeletes = (pending[table] ?? []).filter((item) => item !== id)
-  writeStored(pendingDeleteKey, { ...pending, [table]: tableDeletes })
-}
-
 const formatMoney = (value: number) =>
   new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 2 }).format(value)
 
@@ -345,120 +309,40 @@ const rowToSale = (row: SaleRow): Sale => ({
   createdAt: row.created_at,
 })
 
-const mergeByKey = <T,>(
-  remoteRows: T[],
-  localRows: T[],
-  getKey: (row: T) => string,
-  pendingDeletes: Array<number | string> = [],
-  localWins = true,
-) => {
-  const deleted = new Set(pendingDeletes.map(String))
-  const merged = new Map<string, T>()
+const offlineStore = new OfflineStore(window.localStorage, {
+  products: readStored<Medicine[]>('purela.clean.inventory', initialInventory),
+  customers: readStored<Customer[]>('purela.customers', []),
+  prescriptions: readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions).map(prescriptionToRow),
+  sales: readStored<Sale[]>('purela.clean.sales', initialSales).map(saleToRow),
+}, readStored('purela.pendingDeletes', {}))
 
-  remoteRows.forEach((row) => {
-    if (!deleted.has(getKey(row))) {
-      merged.set(getKey(row), row)
+const transport: Transport | null = supabase ? {
+  async upsert(table, row) {
+    const { error } = await supabase!.from(table).upsert(row, { onConflict: 'id' })
+    if (error) throw new Error(error.message)
+  },
+  async remove(table, id) {
+    const { error } = await supabase!.from(table).delete().eq('id', id)
+    if (error) throw new Error(error.message)
+  },
+  async read(table) {
+    const rows: Row[] = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase!.from(table).select('*').order('id').range(from, from + 999)
+      if (error) throw new Error(error.message)
+      rows.push(...(data ?? []))
+      if (!data || data.length < 1000) return rows
     }
-  })
+  },
+} : null
 
-  localRows.forEach((row) => {
-    if (!deleted.has(getKey(row))) {
-      if (localWins || !merged.has(getKey(row))) {
-        merged.set(getKey(row), row)
-      }
-    }
-  })
-
-  return Array.from(merged.values())
-}
-
-const mergeProducts = (remoteProducts: Medicine[], localProducts: Medicine[], pendingDeletes: Array<number | string> = [], localWins = true) => {
-  const deleted = new Set(pendingDeletes.map(String))
-  const activeRemote = remoteProducts.filter((product) => !deleted.has(String(product.id)) && !deleted.has(product.batch))
-  const activeLocal = localProducts.filter((product) => !deleted.has(String(product.id)) && !deleted.has(product.batch))
-
-  return mergeByKey(activeRemote, activeLocal, (product) => product.batch || String(product.id), [], localWins).sort((a, b) => a.name.localeCompare(b.name))
-}
-
-const mergeCustomers = (remoteCustomers: Customer[], localCustomers: Customer[], localWins = true) =>
-  mergeByKey(remoteCustomers, localCustomers, (customer) => String(customer.id), [], localWins).sort((a, b) => a.name.localeCompare(b.name))
-
-const mergePrescriptions = (remotePrescriptions: Prescription[], localPrescriptions: Prescription[], localWins = true) =>
-  mergeByKey(remotePrescriptions, localPrescriptions, (prescription) => prescription.id, [], localWins)
-
-const mergeSales = (remoteSales: Sale[], localSales: Sale[], localWins = true) =>
-  mergeByKey(remoteSales, localSales, (sale) => sale.id, [], localWins).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-
-const syncSupabase = async <T extends { id: number | string }>(table: string, rows: T[]) => {
-  if (rows.length === 0) return null
-  if (!supabase || !navigator.onLine) {
-    markPendingSync(table)
-    return null
-  }
-
-  try {
-    const result = await supabase.from(table).upsert(rows, { onConflict: 'id' })
-    if (result.error) {
-      markPendingSync(table)
-    } else {
-      clearPendingSync(table)
-    }
-    return result
-  } catch {
-    markPendingSync(table)
-    return null
-  }
-}
-
-const clearSupabaseTable = async (table: string, textId = false) => {
-  if (!supabase) return null
-  return supabase.from(table).delete().neq('id', textId ? '' : -1)
-}
-
-const flushPendingSupabaseData = async () => {
-  const client = supabase
-  if (!client || !navigator.onLine) return
-
-  const pending = readStored<string[]>(pendingSyncKey, [])
-  if (pending.length === 0) return
-  const pendingDeletes = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
-
-  const tasks: Record<string, () => Promise<unknown>> = {
-    products: () => syncSupabase('products', readStored<Medicine[]>('purela.clean.inventory', initialInventory)),
-    customers: () => syncSupabase('customers', readStored<Customer[]>('purela.customers', initialCustomers)),
-    prescriptions: () =>
-      syncSupabase(
-        'prescriptions',
-        readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions).map(prescriptionToRow),
-      ),
-    sales: () => syncSupabase('sales', readStored<Sale[]>('purela.clean.sales', initialSales).map(saleToRow)),
-  }
-
-  await Promise.all(
-    pending.map(async (table) => {
-      await tasks[table]?.()
-
-      if (pendingDeletes[table]?.length) {
-        await Promise.all(
-          pendingDeletes[table].map(async (id) => {
-            const result = await client.from(table).delete().eq('id', id)
-            if (!result.error) {
-              clearPendingDelete(table, id)
-            } else {
-              markPendingSync(table)
-            }
-          }),
-        )
-      }
-    }),
-  )
-}
+const syncNow = () => offlineStore.sync(transport, navigator.onLine)
 
 function App() {
-  const [inventory, setInventory] = useState<Medicine[]>(() => readStored('purela.clean.inventory', initialInventory))
-  const [customers, setCustomers] = useState<Customer[]>(() => readStored('purela.customers', initialCustomers))
-  const [prescriptions, setPrescriptions] = useState<Prescription[]>(() => readStored('purela.clean.prescriptions', initialPrescriptions))
-  const [sales, setSales] = useState<Sale[]>(() => readStored('purela.clean.sales', initialSales))
+  const [inventory, setInventory] = useState<Medicine[]>(() => offlineStore.read<Medicine>('products'))
+  const [customers, setCustomers] = useState<Customer[]>(() => offlineStore.read<Customer>('customers'))
+  const [prescriptions, setPrescriptions] = useState<Prescription[]>(() => offlineStore.read<PrescriptionRow>('prescriptions').map(rowToPrescription))
+  const [sales, setSales] = useState<Sale[]>(() => offlineStore.read<SaleRow>('sales').map(rowToSale))
   const [cart, setCart] = useState<CartLine[]>([])
   const [activeTab, setActiveTab] = useState<TabLabel>('Register')
   const [query, setQuery] = useState('')
@@ -482,99 +366,37 @@ function App() {
     name: readStored('purela.cashierName', ''),
   }))
 
+  const [syncStatus, setSyncStatus] = useState(offlineStore.status)
+  const [pendingCount, setPendingCount] = useState(offlineStore.pendingCount)
+
   useEffect(() => {
-    let cancelled = false
-
-    const loadSupabaseData = async () => {
-      if (!supabase) return
-
-      await flushPendingSupabaseData()
-
-      const [productsResult, customersResult, prescriptionsResult, salesResult] = await Promise.all([
-        supabase.from('products').select('*').order('id'),
-        supabase.from('customers').select('*').order('id'),
-        supabase.from('prescriptions').select('*').order('id'),
-        supabase.from('sales').select('*').order('created_at', { ascending: false }),
-      ])
-
-      const firstError = productsResult.error ?? customersResult.error ?? prescriptionsResult.error ?? salesResult.error
-      if (firstError) {
-        setToast('Database tables are missing. Run supabase.schema.sql in SQL editor.')
-        return
-      }
-
-      if (cancelled) return
-
-      const productRows = (productsResult.data ?? []) as ProductRow[]
-      const customerRows = (customersResult.data ?? []) as CustomerRow[]
-      const prescriptionRows = (prescriptionsResult.data ?? []) as PrescriptionRow[]
-      const saleRows = (salesResult.data ?? []) as SaleRow[]
-      const pendingTables = readStored<string[]>(pendingSyncKey, [])
-      const pendingDeletes = readStored<Record<string, Array<number | string>>>(pendingDeleteKey, {})
-      const localProducts = readStored<Medicine[]>('purela.clean.inventory', initialInventory)
-      const localCustomers = readStored<Customer[]>('purela.customers', initialCustomers)
-      const localPrescriptions = readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions)
-      const localSales = readStored<Sale[]>('purela.clean.sales', initialSales)
-      const remotePrescriptions = prescriptionRows.map(rowToPrescription)
-      const remoteSales = saleRows.map(rowToSale)
-      const mergedProducts = mergeProducts(productRows, localProducts, pendingDeletes.products, pendingTables.includes('products'))
-      const mergedCustomers = mergeCustomers(customerRows, localCustomers, pendingTables.includes('customers'))
-      const mergedPrescriptions = mergePrescriptions(remotePrescriptions, localPrescriptions, pendingTables.includes('prescriptions'))
-      const mergedSales = mergeSales(remoteSales, localSales, pendingTables.includes('sales'))
-
-      if (mergedProducts.length !== productRows.length || pendingTables.includes('products')) {
-        void syncSupabase('products', mergedProducts)
-      }
-      if (mergedCustomers.length !== customerRows.length || pendingTables.includes('customers')) {
-        void syncSupabase('customers', mergedCustomers)
-      }
-      if (mergedPrescriptions.length !== remotePrescriptions.length || pendingTables.includes('prescriptions')) {
-        void syncSupabase('prescriptions', mergedPrescriptions.map(prescriptionToRow))
-      }
-      if (mergedSales.length !== remoteSales.length || pendingTables.includes('sales')) {
-        void syncSupabase('sales', mergedSales.map(saleToRow))
-      }
-
-      setInventory(mergedProducts)
-      setCustomers(mergedCustomers)
-      setPrescriptions(mergedPrescriptions)
-      setSales(mergedSales)
-      writeStored('purela.clean.inventory', mergedProducts)
-      writeStored('purela.customers', mergedCustomers)
-      writeStored('purela.clean.prescriptions', mergedPrescriptions)
-      writeStored('purela.clean.sales', mergedSales)
+    const refresh = () => {
+      setInventory(offlineStore.read<Medicine>('products'))
+      setCustomers(offlineStore.read<Customer>('customers'))
+      setPrescriptions(offlineStore.read<PrescriptionRow>('prescriptions').map(rowToPrescription))
+      setSales(offlineStore.read<SaleRow>('sales').map(rowToSale))
+      setSyncStatus(offlineStore.status)
+      setPendingCount(offlineStore.pendingCount)
     }
-
-    void loadSupabaseData()
-
-    const handleOnline = () => {
-      void loadSupabaseData()
-    }
-
-    const syncChannel = supabase
-      ?.channel('purela-pos-sync')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => {
-        void loadSupabaseData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'customers' }, () => {
-        void loadSupabaseData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'prescriptions' }, () => {
-        void loadSupabaseData()
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => {
-        void loadSupabaseData()
-      })
-      .subscribe()
-
-    window.addEventListener('online', handleOnline)
-
+    const unsubscribe = offlineStore.subscribe(refresh)
+    const handleSync = () => { void syncNow() }
+    refresh()
+    handleSync()
+    const timer = window.setInterval(handleSync, 30000)
+    window.addEventListener('online', handleSync)
+    window.addEventListener('offline', handleSync)
+    window.addEventListener('focus', handleSync)
+    // Request persistent storage where supported; an explicit clear still removes it.
+    void navigator.storage?.persist?.().catch(() => false)
+    const channel = supabase?.channel('purela-pos-sync')
+      .on('postgres_changes', { event: '*', schema: 'public' }, handleSync).subscribe()
     return () => {
-      cancelled = true
-      window.removeEventListener('online', handleOnline)
-      if (syncChannel) {
-        void supabase?.removeChannel(syncChannel)
-      }
+      unsubscribe()
+      window.clearInterval(timer)
+      window.removeEventListener('online', handleSync)
+      window.removeEventListener('offline', handleSync)
+      window.removeEventListener('focus', handleSync)
+      if (channel) void supabase?.removeChannel(channel)
     }
   }, [])
 
@@ -639,28 +461,36 @@ function App() {
     })
   }, [prescriptions, sales])
 
-  const persistInventory = (next: Medicine[]) => {
-    setInventory(next)
-    writeStored('purela.clean.inventory', next)
-    void syncSupabase('products', next)
+  const saveChanges = (updates: Parameters<OfflineStore['replace']>[0]) => {
+    try {
+      offlineStore.replace(updates)
+      void syncNow()
+      return true
+    } catch {
+      setToast('Could not save changes. Device storage is unavailable or full. Export a backup before continuing.')
+      return false
+    }
   }
 
-  const persistCustomers = (next: Customer[]) => {
-    setCustomers(next)
-    writeStored('purela.customers', next)
-    void syncSupabase('customers', next)
+  const exportBackup = () => {
+    const url = URL.createObjectURL(new Blob([offlineStore.backup()], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'purela-backup-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const persistPrescriptions = (next: Prescription[]) => {
-    setPrescriptions(next)
-    writeStored('purela.clean.prescriptions', next)
-    void syncSupabase('prescriptions', next.map(prescriptionToRow))
-  }
-
-  const persistSales = (next: Sale[]) => {
-    setSales(next)
-    writeStored('purela.clean.sales', next)
-    void syncSupabase('sales', next.map(saleToRow))
+  const restoreBackup = async (file?: File) => {
+    if (!file) return
+    if (!window.confirm('Restore this backup? Matching records will be replaced with backup values and queued for upload. Export your current data first.')) return
+    try {
+      offlineStore.restore(await file.text())
+      setToast('Backup restored on this device. Changes queued for sync.')
+      void syncNow()
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Backup could not be restored.')
+    }
   }
 
   const addToCart = (medicine: Medicine) => {
@@ -748,9 +578,7 @@ function App() {
         )
       : customers
 
-    persistInventory(nextInventory)
-    persistCustomers(nextCustomers)
-    persistSales([sale, ...sales])
+    if (!saveChanges({ products: nextInventory, customers: nextCustomers, sales: [sale, ...sales].map(saleToRow) })) return
     setCart([])
     setLastReceipt(sale)
     setToast(`Sale ${sale.id} completed successfully.`)
@@ -800,20 +628,10 @@ function App() {
     if (!confirmed) return
 
     const nextInventory = inventory.filter((item) => item.id !== medicine.id)
-    persistInventory(nextInventory)
-    if (supabase && navigator.onLine) {
-      void supabase
-        .from('products')
-        .delete()
-        .eq('id', medicine.id)
-        .then((result) => {
-          if (result.error) {
-            markPendingDelete('products', medicine.id)
-          }
-        })
-    } else {
-      markPendingDelete('products', medicine.id)
-    }
+    if (!saveChanges({
+      products: nextInventory,
+      prescriptions: prescriptions.filter(rx => rx.medicationId !== medicine.id).map(prescriptionToRow),
+    })) return
     setCart((current) => current.filter((item) => item.id !== medicine.id))
     setToast(`${medicine.name} deleted from inventory.`)
   }
@@ -868,7 +686,7 @@ function App() {
       ? inventory.map((item) => (item.id === editingProductId ? medicine : item))
       : [medicine, ...inventory]
 
-    persistInventory(nextInventory)
+    if (!saveChanges({ products: nextInventory })) return
     setCart((current) => current.map((item) => (item.id === medicine.id ? { ...medicine, qty: item.qty } : item)))
     setMedicineForm(emptyMedicineForm)
     setShowProductModal(false)
@@ -893,7 +711,7 @@ function App() {
       status: 'Ready',
     }
 
-    persistCustomers([customer, ...customers])
+    if (!saveChanges({ customers: [customer, ...customers] })) return
     setSelectedCustomerId(customer.id)
     setCustomerForm(emptyCustomerForm)
     setToast(`${customer.name} profile created and attached.`)
@@ -901,37 +719,21 @@ function App() {
 
   const advancePrescription = (id: string) => {
     const next = prescriptions.map((rx) => (rx.id === id ? { ...rx, status: statusFlow[rx.status] } : rx))
-    persistPrescriptions(next)
+    if (!saveChanges({ prescriptions: next.map(prescriptionToRow) })) return
     setToast(`${id} moved to next workflow step.`)
   }
 
   const adjustStock = (id: number, amount: number) => {
     const next = inventory.map((item) => (item.id === id ? { ...item, stock: Math.max(0, item.stock + amount) } : item))
-    persistInventory(next)
+    saveChanges({ products: next })
   }
 
-  const resetDemoData = () => {
-    setInventory(initialInventory)
-    setCustomers(initialCustomers)
-    setPrescriptions(initialPrescriptions)
-    setSales(initialSales)
-    writeStored('purela.clean.inventory', initialInventory)
-    writeStored('purela.customers', initialCustomers)
-    writeStored('purela.clean.prescriptions', initialPrescriptions)
-    writeStored('purela.clean.sales', initialSales)
-    void (async () => {
-      await clearSupabaseTable('sales', true)
-      await clearSupabaseTable('prescriptions', true)
-      await clearSupabaseTable('customers')
-      await clearSupabaseTable('products')
-      await syncSupabase('products', initialInventory)
-      await syncSupabase('customers', initialCustomers)
-      await syncSupabase('prescriptions', initialPrescriptions.map(prescriptionToRow))
-      await syncSupabase('sales', initialSales.map(saleToRow))
-    })()
+  const clearProducts = () => {
+    if (!canManageProducts) { setToast('Only Admin can clear products.'); return }
+    if (!window.confirm('Delete all products and their prescriptions? Sales and customers will be kept.')) return
+    if (!saveChanges({ products: [], prescriptions: [] })) return
     setCart([])
-    setSelectedCustomerId('walk-in')
-    setToast('Inventory products cleared. Customer examples restored.')
+    setToast('Products cleared. Deletions will sync when connected.')
   }
 
   const resolveCashierAccess = async (identifier: string, password: string) => {
@@ -1136,6 +938,7 @@ function App() {
             <h1>{moduleCopy[activeTab].title}</h1>
           </div>
           <div className="topbar-actions">
+            <span role="status" className="sync-status">{syncStatus}{pendingCount > 0 ? ' · ' + pendingCount + ' pending' : ''}</span>
             {!isAppInstalled && (
               <button className="install-top" onClick={installApp} type="button">
                 <Download size={18} />
@@ -1480,7 +1283,7 @@ function App() {
               <div className="panel-heading">
                 <div>
                   <h2>Sales History</h2>
-                  <p>Completed sales remain stored in browser local storage until Supabase is connected.</p>
+                  <p>Sales are saved on this device and uploaded when connected. Check sync status before clearing browser data.</p>
                 </div>
               </div>
               <div className="sales-list">
@@ -1520,10 +1323,18 @@ function App() {
                 </div>
                 <div>
                   <strong>Local data mode</strong>
-                  <span>Sales, stock changes, patients, and prescription status currently persist in browser local storage.</span>
+                  <span>Offline changes stay on this device until uploaded. Clearing browser data before sync deletes unsent changes. Export a backup first.</span>
                 </div>
               </div>
-              <button className="secondary full" onClick={resetDemoData} type="button">Clear Products</button>
+              <button className="secondary full" onClick={exportBackup} type="button">Export Data Backup</button>
+              <label>Restore Data Backup
+                <input type="file" accept=".json,application/json" onChange={(event) => {
+                  void restoreBackup(event.target.files?.[0])
+                  event.target.value = ''
+                }} />
+              </label>
+              <button className="secondary full" onClick={() => { void syncNow() }} type="button">Sync Now</button>
+              <button className="secondary full" onClick={clearProducts} type="button">Clear Products</button>
             </div>
 
             <div className="settings-panel">
