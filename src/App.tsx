@@ -318,17 +318,17 @@ const offlineStore = new OfflineStore(window.localStorage, {
 
 const transport: Transport | null = supabase ? {
   async upsert(table, row) {
-    const { error } = await supabase!.from(table).upsert(row, { onConflict: 'id' })
+    const { error } = await supabase!.from(table).upsert(row, { onConflict: 'id' }).abortSignal(AbortSignal.timeout(15000))
     if (error) throw new Error(error.message)
   },
   async remove(table, id) {
-    const { error } = await supabase!.from(table).delete().eq('id', id)
+    const { error } = await supabase!.from(table).delete().eq('id', id).abortSignal(AbortSignal.timeout(15000))
     if (error) throw new Error(error.message)
   },
   async read(table) {
     const rows: Row[] = []
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase!.from(table).select('*').order('id').range(from, from + 999)
+      const { data, error } = await supabase!.from(table).select('*').order('id').range(from, from + 999).abortSignal(AbortSignal.timeout(15000))
       if (error) throw new Error(error.message)
       rows.push(...(data ?? []))
       if (!data || data.length < 1000) return rows
@@ -382,17 +382,23 @@ function App() {
     const handleSync = () => { void syncNow() }
     refresh()
     handleSync()
-    const timer = window.setInterval(handleSync, 30000)
+    const handleVisible = () => {
+      if (document.visibilityState === 'visible') handleSync()
+    }
+    const timer = window.setInterval(handleVisible, 5000)
+    document.addEventListener('visibilitychange', handleVisible)
     window.addEventListener('online', handleSync)
     window.addEventListener('offline', handleSync)
     window.addEventListener('focus', handleSync)
     // Request persistent storage where supported; an explicit clear still removes it.
     void navigator.storage?.persist?.().catch(() => false)
     const channel = supabase?.channel('purela-pos-sync')
-      .on('postgres_changes', { event: '*', schema: 'public' }, handleSync).subscribe()
+      .on('postgres_changes', { event: '*', schema: 'public' }, handleSync)
+      .subscribe((status) => { if (status === 'SUBSCRIBED') handleSync() })
     return () => {
       unsubscribe()
       window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', handleVisible)
       window.removeEventListener('online', handleSync)
       window.removeEventListener('offline', handleSync)
       window.removeEventListener('focus', handleSync)

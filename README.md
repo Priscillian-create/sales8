@@ -38,7 +38,8 @@ The supplied `public/supabase-config.js` also supports runtime configuration. Th
 - Checkout saves the sale, customer update, and stock reduction in one local write. If storage fails, checkout does not report success.
 - Only changed records upload. Failed uploads remain queued. Requests run sequentially, and an older response cannot acknowledge a newer change.
 - Products and customers upload before prescriptions. Deletions persist even when the final product is removed.
-- Startup, reconnect, focus, realtime notifications, and a 30-second timer trigger sync. Settings also provides Sync Now.
+- Changes upload immediately. Startup, reconnect, focus, returning to a visible tab, realtime subscription/reconnection, and realtime notifications trigger sync. A five-second timer refreshes visible apps even if realtime is unavailable. Settings retains Sync Now as an optional retry.
+- Refresh events arriving during sync queue a follow-up pass. Requests have a 15-second timeout. A failed row stays pending without blocking unrelated uploads or incoming records; failed table reads preserve that table's local cache.
 - Remote reads are paginated. Responses fetched before a local edit are discarded. The service worker no longer caches database responses.
 - Clear Products preserves sales and customers. It requires Admin access and confirmation.
 - Settings includes Export Data Backup and Restore Data Backup. Backup files contain business/customer data; keep them in a safe location outside browser storage.

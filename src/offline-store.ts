@@ -17,6 +17,7 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 export class OfflineStore {
   private state: Snapshot
   private running: Promise<void> | null = null
+  private syncRequested = false
   private listeners = new Set<() => void>()
   status = 'Waiting to sync'
   private storage: Pick<Storage, 'getItem' | 'setItem'>
@@ -111,7 +112,10 @@ export class OfflineStore {
   }
 
   sync(transport: Transport | null, online: boolean): Promise<void> {
-    if (this.running) return this.running
+    if (this.running) {
+      this.syncRequested = true
+      return this.running
+    }
     if (!transport || !online) {
       this.status = !transport ? 'Cloud not configured — export a backup' : 'Offline — changes saved on this device'
       this.emit()
@@ -119,7 +123,12 @@ export class OfflineStore {
     }
     this.status = 'Syncing…'
     this.emit()
-    this.running = this.run(transport).catch((error: unknown) => {
+    this.running = (async () => {
+      do {
+        this.syncRequested = false
+        await this.run(transport)
+      } while (this.syncRequested)
+    })().catch((error: unknown) => {
       this.status = `Sync failed — changes kept on this device. ${error instanceof Error ? error.message : String(error)}`
       this.emit()
     }).finally(() => { this.running = null })
@@ -129,6 +138,7 @@ export class OfflineStore {
   private async run(transport: Transport) {
     // Retry on the next timer/reconnect if edits keep arriving during a read.
     for (let attempt = 0; attempt < 3; attempt++) {
+      const errors: string[] = []
       const changes = [...this.state.pending].sort((a, b) => {
         if (!a.row && b.row) return -1
         if (a.row && !b.row) return 1
@@ -136,21 +146,44 @@ export class OfflineStore {
       })
       for (const change of changes) {
         if (!this.state.pending.some(item => item.version === change.version)) continue
-        if (change.row) await transport.upsert(change.table, change.row)
-        else await transport.remove(change.table, change.id)
+        try {
+          if (change.row) await transport.upsert(change.table, change.row)
+          else await transport.remove(change.table, change.id)
+        } catch (error) {
+          errors.push(`${change.table}: ${error instanceof Error ? error.message : String(error)}`)
+          continue
+        }
         const next = structuredClone(this.state)
         next.pending = next.pending.filter(item => item.version !== change.version)
         this.commit(next)
       }
-      if (this.pendingCount) continue
       const revision = this.state.revision
-      const remote = await Promise.all(tables.map(table => transport.read(table)))
+      const remote = await Promise.allSettled(tables.map(table => transport.read(table)))
       // Never apply a response fetched before a local change.
       if (revision !== this.state.revision) continue
       const next = structuredClone(this.state)
-      tables.forEach((table, index) => { next.data[table] = remote[index] })
+      tables.forEach((table, index) => {
+        const result = remote[index]
+        if (result.status === 'rejected') {
+          errors.push(`${table}: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`)
+          return
+        }
+        const rows = new Map(result.value.map(row => [row.id, row]))
+        // A failed local edit or deletion stays visible while other cloud rows refresh.
+        for (const change of next.pending.filter(item => item.table === table)) {
+          if (change.row) rows.set(change.id, change.row)
+          else rows.delete(change.id)
+        }
+        next.data[table] = [...rows.values()]
+      })
       this.commit(next)
-      this.status = 'All changes synced to cloud'
+      if (errors.length) {
+        this.status = `Automatic sync will retry — local changes kept. ${errors[0]}`
+      } else if (this.pendingCount) {
+        continue
+      } else {
+        this.status = 'All changes synced to cloud'
+      }
       this.emit()
       return
     }

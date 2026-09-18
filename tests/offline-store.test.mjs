@@ -173,3 +173,53 @@ test('invalid backups leave existing data untouched', () => {
   assert.throws(() => store.restore('{"version":1,"data":{},"pending":[]}'))
   assert.equal(store.backup(), before)
 })
+
+test('a realtime event during an existing fetch triggers a follow-up fetch', async () => {
+  const store = new OfflineStore(memory(), empty()), remote = cloud()
+  const read = remote.read
+  let changed = false
+  remote.read = async table => {
+    const snapshot = await read(table)
+    if (table === 'products' && !changed) {
+      changed = true
+      remote.data.products = [{ id: 5, name: 'New product from another device' }]
+      void store.sync(remote, true)
+    }
+    return snapshot
+  }
+  await store.sync(remote, true)
+  assert.equal(store.read('products')[0].id, 5)
+})
+
+test('a rejected local row does not block incoming products or other uploads', async () => {
+  const store = new OfflineStore(memory(), empty()), remote = cloud()
+  store.replace({ products: [{ id: 1, name: 'Local edit' }], sales: [{ id: 'sale-1' }] })
+  remote.data.products = [{ id: 1, name: 'Older cloud value' }, { id: 2, name: 'New cloud product' }]
+  const write = remote.upsert
+  remote.upsert = async (table, row) => {
+    if (table === 'products') throw new Error('validation failed')
+    await write(table, row)
+  }
+  await store.sync(remote, true)
+  assert.equal(store.pendingCount, 1)
+  assert.equal(store.read('products').find(row => row.id === 1).name, 'Local edit')
+  assert.equal(store.read('products').find(row => row.id === 2).name, 'New cloud product')
+  assert.equal(remote.data.sales[0].id, 'sale-1')
+  assert.match(store.status, /retry/)
+})
+
+test('a failed table read preserves its cache while other tables refresh', async () => {
+  const store = new OfflineStore(memory(), empty()), remote = cloud()
+  store.replace({ customers: [{ id: 1, name: 'Saved customer' }] })
+  await store.sync(remote, true)
+  remote.data.products = [{ id: 3 }]
+  const read = remote.read
+  remote.read = async table => {
+    if (table === 'customers') throw new Error('temporary read failure')
+    return read(table)
+  }
+  await store.sync(remote, true)
+  assert.equal(store.read('products')[0].id, 3)
+  assert.equal(store.read('customers')[0].name, 'Saved customer')
+  assert.match(store.status, /temporary read failure/)
+})
