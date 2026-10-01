@@ -1038,8 +1038,51 @@ button.customer-card:hover {
   font-weight: 700;
 }
 
-.sales-list {
+.sales-list,
+.shift-records {
   margin-top: 16px;
+}
+
+.shift-records {
+  display: grid;
+  gap: 16px;
+}
+
+.shift-record {
+  border: 1px solid #e0e7ef;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfe;
+}
+
+.shift-record-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e6edf3;
+}
+
+.shift-record-heading div {
+  display: grid;
+  gap: 3px;
+}
+
+.shift-record-heading strong {
+  color: #162536;
+  font-size: 15px;
+}
+
+.shift-record-heading span,
+.empty-shift-record {
+  color: #667789;
+  font-size: 13px;
+}
+
+.shift-record-heading b {
+  color: #0f766e;
+  font-size: 16px;
 }
 
 .sale-row {
@@ -1052,6 +1095,16 @@ button.customer-card:hover {
   background: #f8fafc;
   text-align: left;
   color: #526477;
+}
+
+.shift-sale-row {
+  grid-template-columns: 110px minmax(140px, 1fr) 95px minmax(180px, 1.25fr) 90px;
+}
+
+.empty-shift-record {
+  padding: 12px;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .sale-row strong,

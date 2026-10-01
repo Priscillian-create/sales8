@@ -445,6 +445,9 @@ function App() {
     'POS Card': sales.filter((sale) => sale.payment === 'POS Card').reduce((sum, sale) => sum + sale.total, 0),
     Credit: sales.filter((sale) => sale.payment === 'Credit').reduce((sum, sale) => sum + sale.total, 0),
   }
+  const morningSales = sales.filter((sale) => sale.shift === 'Morning Shift')
+  const afternoonSales = sales.filter((sale) => sale.shift === 'Afternoon Shift')
+  const otherShiftSales = sales.filter((sale) => sale.shift !== 'Morning Shift' && sale.shift !== 'Afternoon Shift')
   const canManageProducts = cashierRole === 'Admin'
 
   const filteredInventory = inventory.filter((item) => {
@@ -1299,17 +1302,80 @@ function App() {
                   <p>Sales are saved on this device and uploaded when connected. Check sync status before clearing browser data.</p>
                 </div>
               </div>
-              <div className="sales-list">
-                {sales.map((sale) => (
-                  <button className="sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                    <strong>{sale.id}</strong>
-                    <span>{sale.patient}</span>
-                    <span>{sale.payment}</span>
-                    <span>{sale.shift ?? 'Not recorded'}</span>
-                    <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                    <b>{formatMoney(sale.total)}</b>
-                  </button>
-                ))}
+              <div className="shift-records">
+                <div className="shift-record">
+                  <div className="shift-record-heading">
+                    <div>
+                      <strong>Morning Shift</strong>
+                      <span>7:00 AM - 3:00 PM</span>
+                    </div>
+                    <b>{formatMoney(morningSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
+                  </div>
+                  <div className="sales-list">
+                    {morningSales.length > 0 ? (
+                      morningSales.map((sale) => (
+                        <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                          <strong>{sale.id}</strong>
+                          <span>{sale.patient}</span>
+                          <span>{sale.payment}</span>
+                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                          <b>{formatMoney(sale.total)}</b>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="empty-shift-record">No morning shift sales recorded yet.</div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="shift-record">
+                  <div className="shift-record-heading">
+                    <div>
+                      <strong>Afternoon Shift</strong>
+                      <span>3:00 PM - 11:00 PM</span>
+                    </div>
+                    <b>{formatMoney(afternoonSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
+                  </div>
+                  <div className="sales-list">
+                    {afternoonSales.length > 0 ? (
+                      afternoonSales.map((sale) => (
+                        <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                          <strong>{sale.id}</strong>
+                          <span>{sale.patient}</span>
+                          <span>{sale.payment}</span>
+                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                          <b>{formatMoney(sale.total)}</b>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="empty-shift-record">No afternoon shift sales recorded yet.</div>
+                    )}
+                  </div>
+                </div>
+
+                {otherShiftSales.length > 0 && (
+                  <div className="shift-record">
+                    <div className="shift-record-heading">
+                      <div>
+                        <strong>Other Sales</strong>
+                        <span>Sales outside the two active pharmacy shifts.</span>
+                      </div>
+                      <b>{formatMoney(otherShiftSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
+                    </div>
+                    <div className="sales-list">
+                      {otherShiftSales.map((sale) => (
+                        <button className="sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                          <strong>{sale.id}</strong>
+                          <span>{sale.patient}</span>
+                          <span>{sale.payment}</span>
+                          <span>{sale.shift ?? 'Not recorded'}</span>
+                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                          <b>{formatMoney(sale.total)}</b>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </section>
