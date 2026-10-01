@@ -130,6 +130,8 @@ type LoginForm = {
   password: string
 }
 
+type ReportShiftFilter = 'All' | 'Morning Shift' | 'Afternoon Shift'
+
 type PrescriptionRow = {
   id: string
   patient_id: number
@@ -251,6 +253,11 @@ const writeStored = <T,>(key: string, value: T) => {
 const formatMoney = (value: number) =>
   new Intl.NumberFormat('en-NG', { style: 'currency', currency: 'NGN', maximumFractionDigits: 2 }).format(value)
 
+const formatDateInput = (date: Date) => {
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return localDate.toISOString().slice(0, 10)
+}
+
 const nextOfflineSafeId = () => Date.now() + Math.floor(Math.random() * 1000)
 
 const generateBatchNumber = () => {
@@ -365,6 +372,9 @@ function App() {
     ...emptyLoginForm,
     name: readStored('purela.cashierName', ''),
   }))
+  const [reportShiftFilter, setReportShiftFilter] = useState<ReportShiftFilter>('All')
+  const [reportStartDate, setReportStartDate] = useState('')
+  const [reportEndDate, setReportEndDate] = useState('')
 
   const [syncStatus, setSyncStatus] = useState(offlineStore.status)
   const [pendingCount, setPendingCount] = useState(offlineStore.pendingCount)
@@ -438,16 +448,33 @@ function App() {
   const inventoryUnits = inventory.reduce((sum, item) => sum + item.stock, 0)
   const expiringSoon = inventory.filter((item) => item.expiry < '2027-01-01')
   const rxFilled = prescriptions.filter((rx) => rx.status === 'Filled' || rx.status === 'Released').length
-  const netSales = sales.reduce((sum, sale) => sum + sale.total, 0)
+  const filteredReportSales = useMemo(() => {
+    const startDate = reportStartDate && reportEndDate && reportStartDate > reportEndDate ? reportEndDate : reportStartDate
+    const endDate = reportStartDate && reportEndDate && reportStartDate > reportEndDate ? reportStartDate : reportEndDate
+
+    return sales.filter((sale) => {
+      const saleDate = formatDateInput(new Date(sale.createdAt))
+      const matchesShift = reportShiftFilter === 'All' || sale.shift === reportShiftFilter
+      const matchesStart = !startDate || saleDate >= startDate
+      const matchesEnd = !endDate || saleDate <= endDate
+      return matchesShift && matchesStart && matchesEnd
+    })
+  }, [reportEndDate, reportShiftFilter, reportStartDate, sales])
+  const reportPeriodLabel = reportStartDate || reportEndDate
+    ? `${reportStartDate || 'First record'} to ${reportEndDate || 'Today'}`
+    : 'All dates'
+  const netSales = filteredReportSales.reduce((sum, sale) => sum + sale.total, 0)
   const paymentTotals = {
-    Cash: sales.filter((sale) => sale.payment === 'Cash').reduce((sum, sale) => sum + sale.total, 0),
-    Transfer: sales.filter((sale) => sale.payment === 'Transfer').reduce((sum, sale) => sum + sale.total, 0),
-    'POS Card': sales.filter((sale) => sale.payment === 'POS Card').reduce((sum, sale) => sum + sale.total, 0),
-    Credit: sales.filter((sale) => sale.payment === 'Credit').reduce((sum, sale) => sum + sale.total, 0),
+    Cash: filteredReportSales.filter((sale) => sale.payment === 'Cash').reduce((sum, sale) => sum + sale.total, 0),
+    Transfer: filteredReportSales.filter((sale) => sale.payment === 'Transfer').reduce((sum, sale) => sum + sale.total, 0),
+    'POS Card': filteredReportSales.filter((sale) => sale.payment === 'POS Card').reduce((sum, sale) => sum + sale.total, 0),
+    Credit: filteredReportSales.filter((sale) => sale.payment === 'Credit').reduce((sum, sale) => sum + sale.total, 0),
   }
-  const morningSales = sales.filter((sale) => sale.shift === 'Morning Shift')
-  const afternoonSales = sales.filter((sale) => sale.shift === 'Afternoon Shift')
-  const otherShiftSales = sales.filter((sale) => sale.shift !== 'Morning Shift' && sale.shift !== 'Afternoon Shift')
+  const morningSales = filteredReportSales.filter((sale) => sale.shift === 'Morning Shift')
+  const afternoonSales = filteredReportSales.filter((sale) => sale.shift === 'Afternoon Shift')
+  const otherShiftSales = filteredReportSales.filter((sale) => sale.shift !== 'Morning Shift' && sale.shift !== 'Afternoon Shift')
+  const showMorningReport = reportShiftFilter === 'All' || reportShiftFilter === 'Morning Shift'
+  const showAfternoonReport = reportShiftFilter === 'All' || reportShiftFilter === 'Afternoon Shift'
   const canManageProducts = cashierRole === 'Admin'
 
   const filteredInventory = inventory.filter((item) => {
@@ -463,14 +490,14 @@ function App() {
   const salesData = useMemo(() => {
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     return days.map((day, index) => {
-      const daySales = sales.filter((_, saleIndex) => saleIndex % 7 === index)
+      const daySales = filteredReportSales.filter((_, saleIndex) => saleIndex % 7 === index)
       return {
         day,
         sales: daySales.reduce((sum, sale) => sum + sale.total, 0),
         scripts: prescriptions.filter((_, rxIndex) => rxIndex % 7 === index).length,
       }
     })
-  }, [prescriptions, sales])
+  }, [filteredReportSales, prescriptions])
 
   const saveChanges = (updates: Parameters<OfflineStore['replace']>[0]) => {
     try {
@@ -1253,9 +1280,66 @@ function App() {
 
         {activeTab === 'Reports' && (
           <section className="reports-stack">
+            <div className="ops-panel report-filter-panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>Sales Report Filter</h2>
+                  <p>Select a shift and date period to view previous sales records.</p>
+                </div>
+                <Filter size={20} />
+              </div>
+              <div className="report-filter-grid">
+                <label>
+                  Shift
+                  <select value={reportShiftFilter} onChange={(event) => setReportShiftFilter(event.target.value as ReportShiftFilter)}>
+                    <option value="All">All shifts</option>
+                    <option value="Morning Shift">Morning Shift</option>
+                    <option value="Afternoon Shift">Afternoon Shift</option>
+                  </select>
+                </label>
+                <label>
+                  From date
+                  <input type="date" value={reportStartDate} onChange={(event) => setReportStartDate(event.target.value)} />
+                </label>
+                <label>
+                  To date
+                  <input type="date" value={reportEndDate} onChange={(event) => setReportEndDate(event.target.value)} />
+                </label>
+                <div className="report-filter-actions">
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      const today = formatDateInput(new Date())
+                      setReportStartDate(today)
+                      setReportEndDate(today)
+                    }}
+                    type="button"
+                  >
+                    Today
+                  </button>
+                  <button
+                    className="ghost-button"
+                    onClick={() => {
+                      setReportShiftFilter('All')
+                      setReportStartDate('')
+                      setReportEndDate('')
+                    }}
+                    type="button"
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <div className="report-filter-summary">
+                <span>{reportShiftFilter === 'All' ? 'All shifts' : reportShiftFilter}</span>
+                <span>{reportPeriodLabel}</span>
+                <strong>{filteredReportSales.length} sales found</strong>
+              </div>
+            </div>
+
             <section className="metric-strip" aria-label="Business metrics">
-              <Metric icon={WalletCards} label="Net sales" value={formatMoney(netSales)} trend={`${sales.length} completed`} />
-              <Metric icon={ReceiptText} label="Transactions" value={String(sales.length)} trend={`${cart.length} cart lines`} />
+              <Metric icon={WalletCards} label="Net sales" value={formatMoney(netSales)} trend={`${filteredReportSales.length} completed`} />
+              <Metric icon={ReceiptText} label="Transactions" value={String(filteredReportSales.length)} trend={reportPeriodLabel} />
               <Metric icon={Stethoscope} label="Rx filled" value={String(rxFilled)} trend={`${prescriptions.length} active scripts`} />
               <Metric icon={AlertTriangle} label="Stock alerts" value={String(lowStock.length + expiringSoon.length)} trend={`${lowStock.length} reorder`} warning />
             </section>
@@ -1303,57 +1387,61 @@ function App() {
                 </div>
               </div>
               <div className="shift-records">
-                <div className="shift-record">
-                  <div className="shift-record-heading">
-                    <div>
-                      <strong>Morning Shift</strong>
-                      <span>7:00 AM - 3:00 PM</span>
+                {showMorningReport && (
+                  <div className="shift-record">
+                    <div className="shift-record-heading">
+                      <div>
+                        <strong>Morning Shift</strong>
+                        <span>7:00 AM - 3:00 PM</span>
+                      </div>
+                      <b>{formatMoney(morningSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
                     </div>
-                    <b>{formatMoney(morningSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
-                  </div>
-                  <div className="sales-list">
-                    {morningSales.length > 0 ? (
-                      morningSales.map((sale) => (
-                        <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                          <strong>{sale.id}</strong>
-                          <span>{sale.patient}</span>
-                          <span>{sale.payment}</span>
-                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                          <b>{formatMoney(sale.total)}</b>
-                        </button>
-                      ))
-                    ) : (
-                      <div className="empty-shift-record">No morning shift sales recorded yet.</div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="shift-record">
-                  <div className="shift-record-heading">
-                    <div>
-                      <strong>Afternoon Shift</strong>
-                      <span>3:00 PM - 11:00 PM</span>
+                    <div className="sales-list">
+                      {morningSales.length > 0 ? (
+                        morningSales.map((sale) => (
+                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                            <strong>{sale.id}</strong>
+                            <span>{sale.patient}</span>
+                            <span>{sale.payment}</span>
+                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                            <b>{formatMoney(sale.total)}</b>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="empty-shift-record">No morning shift sales recorded for this report filter.</div>
+                      )}
                     </div>
-                    <b>{formatMoney(afternoonSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
                   </div>
-                  <div className="sales-list">
-                    {afternoonSales.length > 0 ? (
-                      afternoonSales.map((sale) => (
-                        <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                          <strong>{sale.id}</strong>
-                          <span>{sale.patient}</span>
-                          <span>{sale.payment}</span>
-                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                          <b>{formatMoney(sale.total)}</b>
-                        </button>
-                      ))
-                    ) : (
-                      <div className="empty-shift-record">No afternoon shift sales recorded yet.</div>
-                    )}
-                  </div>
-                </div>
+                )}
 
-                {otherShiftSales.length > 0 && (
+                {showAfternoonReport && (
+                  <div className="shift-record">
+                    <div className="shift-record-heading">
+                      <div>
+                        <strong>Afternoon Shift</strong>
+                        <span>3:00 PM - 11:00 PM</span>
+                      </div>
+                      <b>{formatMoney(afternoonSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
+                    </div>
+                    <div className="sales-list">
+                      {afternoonSales.length > 0 ? (
+                        afternoonSales.map((sale) => (
+                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                            <strong>{sale.id}</strong>
+                            <span>{sale.patient}</span>
+                            <span>{sale.payment}</span>
+                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                            <b>{formatMoney(sale.total)}</b>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="empty-shift-record">No afternoon shift sales recorded for this report filter.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {reportShiftFilter === 'All' && otherShiftSales.length > 0 && (
                   <div className="shift-record">
                     <div className="shift-record-heading">
                       <div>
