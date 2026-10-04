@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "test": "tsc --ignoreConfig src/offline-store.ts src/offline-auth.ts --outDir .test-build --target ES2023 --module NodeNext --skipLibCheck && node --test tests",
+    "test": "tsc --ignoreConfig src/offline-store.ts src/offline-auth.ts src/record-id.ts --outDir .test-build --target ES2023 --module NodeNext --skipLibCheck && node --test tests",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

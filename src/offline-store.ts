@@ -1,3 +1,5 @@
+import { createRecordId } from './record-id.js'
+
 export const tables = ['products', 'customers', 'prescriptions', 'sales'] as const
 export type Table = typeof tables[number]
 export type Row = { id: number | string; [key: string]: unknown }
@@ -46,12 +48,16 @@ export class OfflineStore {
       this.commit(this.state)
     }
     if (!this.state.deviceId) {
-      this.commit({ ...this.state, deviceId: crypto.randomUUID() })
+      this.commit({ ...this.state, deviceId: createRecordId() })
     }
   }
 
   read<T>(table: Table): T[] { return structuredClone(this.state.data[table]) as T[] }
   get pendingCount() { return this.state.pending.length }
+  reportSyncError(error: unknown) {
+    this.status = `Sync failed — changes kept on this device. ${error instanceof Error ? error.message : String(error)}`
+    this.emit()
+  }
   refreshFromStorage() {
     const saved = this.storage.getItem(storeKey)
     if (saved && !same(JSON.parse(saved), this.state)) {

@@ -1592,6 +1592,13 @@ button.customer-card:hover {
   gap: 12px;
   padding: 12px 0;
 }
+.checkout-error {
+  margin: 0;
+  padding: 8px 0;
+  color: #b91c1c;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
 .sales-selection-toolbar label,
 .selectable-sale {
   display: flex;

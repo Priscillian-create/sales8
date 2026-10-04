@@ -63,7 +63,7 @@ Use one active POS tab per browser profile. Where supported, browser locks seria
 
 Run `npm test`, `npm run build`, and `npm run lint`.
 
-The 26 regression tests cover offline restart/reconnect, interrupted uploads, overlapping edits, stale reads, deletions, foreign-key ordering, migration, storage quota failure, backup restore, service-worker API exclusions, password verification, and stale tabs. PGlite executes the PostgreSQL migration to verify transactional rollback, multiple offline devices, lost-response replay, stock shortage, and selected sale deletion without changing stock. Isolated browser checks confirmed a sale, receipt, reduced stock, retained reports with the preview server stopped, and sale selection/deletion against disposable mock data. Live Supabase end-to-end testing has not been performed.
+The 29 regression tests cover offline restart/reconnect, interrupted uploads, overlapping edits, stale reads, deletions, foreign-key ordering, migration, storage quota failure, backup restore, service-worker API exclusions, password verification, stale tabs, and record ID generation when the newer UUID API is unavailable. PGlite executes the PostgreSQL migration to verify transactional rollback, multiple offline devices, lost-response replay, stock shortage, and selected sale deletion without changing stock. Isolated browser checks confirmed checkout without randomUUID and with a failing sync lock, receipt creation, reduced stock, visible validation errors, retained reports with the preview server stopped, and sale selection/deletion against disposable mock data. Live Supabase end-to-end testing has not been performed.
 
 ## Supabase handoff notes
 

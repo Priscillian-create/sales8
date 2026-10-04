@@ -44,6 +44,7 @@ import {
 import { isSupabaseConfigured, supabase } from './supabase'
 import { OfflineStore } from './offline-store'
 import { offlineAccess, rememberAccess } from './offline-auth'
+import { createRecordId } from './record-id'
 import type { Transport, Row } from './offline-store'
 import './App.css'
 
@@ -265,7 +266,7 @@ const nextOfflineSafeId = () => {
 }
 
 const generateBatchNumber = () => {
-  const randomPart = crypto.randomUUID().slice(0, 13).toUpperCase()
+  const randomPart = createRecordId().slice(0, 13).toUpperCase()
   return `PUR-${new Date().getFullYear()}-${randomPart}`
 }
 
@@ -366,10 +367,18 @@ const transport: Transport | null = supabase ? {
   },
 } : null
 
-const syncNow = (retryConflicts = false) => navigator.locks
-  ? navigator.locks.request('purela-pos-sync', { ifAvailable: true }, lock => lock
-    ? offlineStore.sync(transport, navigator.onLine, retryConflicts) : Promise.resolve())
-  : offlineStore.sync(transport, navigator.onLine, retryConflicts)
+const syncNow = async (retryConflicts = false) => {
+  try {
+    if (navigator.locks) {
+      await navigator.locks.request('purela-pos-sync', { ifAvailable: true }, lock => lock
+        ? offlineStore.sync(transport, navigator.onLine, retryConflicts) : Promise.resolve())
+    } else {
+      await offlineStore.sync(transport, navigator.onLine, retryConflicts)
+    }
+  } catch (error) {
+    offlineStore.reportSyncError(error)
+  }
+}
 
 function App() {
   const [inventory, setInventory] = useState<Medicine[]>(() => offlineStore.read<Medicine>('products'))
@@ -384,6 +393,7 @@ function App() {
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | 'walk-in'>('walk-in')
   const [lastReceipt, setLastReceipt] = useState<Sale | null>(() => offlineStore.read<SaleRow>('sales').map(rowToSale).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null)
   const [toast, setToast] = useState('Ready for sale')
+  const [checkoutError, setCheckoutError] = useState('')
   const [showProductModal, setShowProductModal] = useState(false)
   const [editingProductId, setEditingProductId] = useState<number | null>(null)
   const [fieldPopup, setFieldPopup] = useState<string[]>([])
@@ -573,8 +583,8 @@ function App() {
       offlineStore.replace(updates)
       void syncNow()
       return true
-    } catch {
-      setToast('Could not save changes. Device storage is unavailable or full. Export a backup before continuing.')
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Could not save changes. Export a backup before continuing.')
       return false
     }
   }
@@ -656,57 +666,78 @@ function App() {
   }
 
   const completeSale = () => {
-    if (cart.length === 0) {
-      setToast('Add at least one medicine to complete a sale.')
-      return
+    setCheckoutError('')
+    const fail = (message: string) => {
+      setCheckoutError(message)
+      setToast(message)
     }
+    try {
+      if (cart.length === 0) {
+        fail('Add at least one medicine to complete a sale.')
+        return
+      }
 
-    const rxLine = cart.find((item) => item.prescription)
-    if (rxLine && !selectedCustomer) {
-      setToast('Attach a patient profile before selling prescription medicine.')
-      return
+      const currentInventory = offlineStore.read<Medicine>('products')
+      const currentCustomers = offlineStore.read<Customer>('customers')
+      const currentSales = offlineStore.read<SaleRow>('sales')
+      const customer = currentCustomers.find(item => item.id === selectedCustomerId)
+
+      const rxLine = cart.find(item => currentInventory.find(medicine => medicine.id === item.id)?.prescription)
+      if (rxLine && !customer) {
+        fail('Attach a patient profile before selling prescription medicine.')
+        return
+      }
+
+      const stockIssue = cart.find((line) => {
+        const medicine = currentInventory.find((item) => item.id === line.id)
+        return !medicine || !Number.isInteger(line.qty) || line.qty <= 0 || line.qty > medicine.stock || medicine.expiry < formatDateInput(new Date())
+      })
+
+      if (stockIssue) {
+        fail(`${stockIssue.name} is unavailable, expired, or has insufficient stock. Review the cart.`)
+        return
+      }
+
+      if (cart.some(item => !Number.isFinite(Number(item.price)) || Number(item.price) <= 0) || !Number.isFinite(total)) {
+        fail('A cart item has an invalid price. Remove it and add it again from Inventory.')
+        return
+      }
+
+      const sale: Sale = {
+        id: `SALE-${createRecordId()}`,
+        patient: customer?.name ?? 'Walk-in customer',
+        cashier: cashierName,
+        payment,
+        shift: currentShift,
+        subtotal,
+        discount,
+        total,
+        items: cart,
+        createdAt: new Date().toISOString(),
+      }
+
+      const nextInventory = currentInventory.map((item) => {
+        const soldLine = cart.find((line) => line.id === item.id)
+        return soldLine ? { ...item, stock: item.stock - soldLine.qty } : item
+      })
+
+      const nextCustomers = customer
+        ? currentCustomers.map((item) =>
+            item.id === customer.id
+              ? { ...item, last: `Purchased ${cart[0].name}`, status: 'Served today' }
+              : item,
+          )
+        : currentCustomers
+
+      // Checkout success depends on the local atomic write, not cloud availability.
+      offlineStore.replace({ products: nextInventory, customers: nextCustomers, sales: [saleToRow(sale), ...currentSales] })
+      setCart([])
+      setLastReceipt(sale)
+      setToast(`Sale ${sale.id} completed successfully.`)
+      void syncNow()
+    } catch (error) {
+      fail(error instanceof Error ? error.message : 'Sale could not be saved. Your cart is unchanged. Export a backup before retrying.')
     }
-
-    const stockIssue = cart.find((line) => {
-      const medicine = offlineStore.read<Medicine>('products').find((item) => item.id === line.id)
-      return !medicine || !Number.isInteger(line.qty) || line.qty <= 0 || line.qty > medicine.stock || medicine.expiry < formatDateInput(new Date())
-    })
-
-    if (stockIssue) {
-      setToast(`${stockIssue.name} is unavailable, expired, or has insufficient stock. Review the cart.`)
-      return
-    }
-
-    const sale: Sale = {
-      id: `SALE-${crypto.randomUUID()}`,
-      patient: selectedCustomer?.name ?? 'Walk-in customer',
-      cashier: cashierName,
-      payment,
-      shift: currentShift,
-      subtotal,
-      discount,
-      total,
-      items: cart,
-      createdAt: new Date().toISOString(),
-    }
-
-    const nextInventory = inventory.map((item) => {
-      const soldLine = cart.find((line) => line.id === item.id)
-      return soldLine ? { ...item, stock: item.stock - soldLine.qty } : item
-    })
-
-    const nextCustomers = selectedCustomer
-      ? customers.map((customer) =>
-          customer.id === selectedCustomer.id
-            ? { ...customer, last: `Purchased ${cart[0].name}`, status: 'Served today' }
-            : customer,
-        )
-      : customers
-
-    if (!saveChanges({ products: nextInventory, customers: nextCustomers, sales: [sale, ...sales].map(saleToRow) })) return
-    setCart([])
-    setLastReceipt(sale)
-    setToast(`Sale ${sale.id} completed successfully.`)
   }
 
   const openAddProduct = () => {
@@ -1232,6 +1263,7 @@ function App() {
                   Complete Sale
                 </button>
               </div>
+              {checkoutError && <p role="alert" className="checkout-error">{checkoutError}</p>}
             </div>
           </section>
         )}
