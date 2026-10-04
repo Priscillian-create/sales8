@@ -96,3 +96,25 @@ test('stale tabs cannot replace a newer offline sale', () => {
   assert.throws(() => b.replace({ sales: [sale('b')] }), /Another tab/)
   assert.equal(b.read('sales')[0].id, 'a')
 })
+
+test('selected sale deletion survives offline restart and failed upload without changing stock', async () => {
+  const db = await database()
+  try {
+    const remote = transport(db), disk = memory()
+    let store = new OfflineStore(disk, empty())
+    store.replace({ products: [product(1, 8)], sales: [sale('delete-me'), sale('keep-me')] })
+    await store.sync(remote, true)
+    store.replace({ sales: store.read('sales').filter(row => row.id !== 'delete-me') })
+    await store.sync(remote, false)
+    store = new OfflineStore(disk, empty())
+    await store.sync({ ...remote, batch: async () => { throw new Error('network failure') } }, true)
+    assert.deepEqual(store.read('sales').map(row => row.id), ['keep-me'])
+    assert.equal(store.pendingCount, 1)
+    assert.equal((await remote.read('sales')).length, 2)
+    await store.sync(remote, true)
+    await store.sync(remote, true)
+    assert.deepEqual((await remote.read('sales')).map(row => row.id), ['keep-me'])
+    assert.equal((await remote.read('products'))[0].stock, 8)
+    assert.equal(store.pendingCount, 0)
+  } finally { await db.close() }
+})

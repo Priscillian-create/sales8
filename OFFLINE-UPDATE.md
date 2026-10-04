@@ -31,7 +31,7 @@ For development, run `npm ci`, `npm test`, and `npm run dev` in the repository r
 
 ## Verification And Limits
 
-All 25 automated tests passed. Tests include real PostgreSQL logic through PGlite for rollback, two offline devices, lost-response replay, and stock shortage. Production build and lint passed; the build retains nonblocking runtime-configuration and large-chunk warnings.
+All 26 automated tests passed. Tests include real PostgreSQL logic through PGlite for rollback, two offline devices, lost-response replay, stock shortage, and selected sale deletion after offline restart and a failed upload. Production build and lint passed; the build retains nonblocking runtime-configuration and large-chunk warnings.
 
 Browser checks used an isolated fixture with cloud configuration disabled, never real sales. With its local server stopped, a sale completed, stock fell from 10 to 9, a receipt showed NGN 100, and an offline reload retained the sale in Reports. Online retry behavior was tested against the local PostgreSQL engine, not the live Supabase service. The browser's backup file-upload control stalled, so interactive backup restore was not verified; data restore logic is covered by automated tests.
 

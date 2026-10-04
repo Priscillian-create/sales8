@@ -1585,6 +1585,44 @@ button.customer-card:hover {
 .sale-row strong {
   overflow-wrap: anywhere;
 }
+.sales-selection-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 0;
+}
+.sales-selection-toolbar label,
+.selectable-sale {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.selectable-sale {
+  min-width: 0;
+}
+.selectable-sale input,
+.sales-selection-toolbar input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.selectable-sale .sale-row {
+  flex: 1;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, .65fr) minmax(0, .8fr) minmax(0, 1.2fr) minmax(0, .7fr);
+}
+.selectable-sale .shift-sale-row {
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, .65fr) minmax(0, 1.2fr) minmax(0, .7fr);
+}
+.selectable-sale .sale-row span {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .selectable-sale .sale-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .metric-strip.inventory-summary {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
 }

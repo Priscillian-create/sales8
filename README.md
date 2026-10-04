@@ -13,6 +13,7 @@ A professional pharmacy point-of-sale front end built with React, TypeScript, Vi
 - Inventory management for stock, batch, supplier, shelf location, reorder level, expiry risk, stock adjustments, and popup product creation
 - Customer creation and immediate attachment to the active sale
 - Sales history and prescription analytics generated from working local data
+- Admin sales selection and confirmed deletion in Reports, including offline deletion sync; deleting records does not restore stock
 - Supabase-ready client module and SQL schema
 - Responsive layout for desktop counters and smaller devices
 
@@ -62,7 +63,7 @@ Use one active POS tab per browser profile. Where supported, browser locks seria
 
 Run `npm test`, `npm run build`, and `npm run lint`.
 
-The 25 regression tests cover offline restart/reconnect, interrupted uploads, overlapping edits, stale reads, deletions, foreign-key ordering, migration, storage quota failure, backup restore, service-worker API exclusions, password verification, and stale tabs. PGlite executes the PostgreSQL migration to verify transactional rollback, multiple offline devices, lost-response replay, and stock shortage. Isolated browser checks confirmed a sale, receipt, reduced stock, and retained reports with the preview server stopped. Live Supabase end-to-end testing has not been performed.
+The 26 regression tests cover offline restart/reconnect, interrupted uploads, overlapping edits, stale reads, deletions, foreign-key ordering, migration, storage quota failure, backup restore, service-worker API exclusions, password verification, and stale tabs. PGlite executes the PostgreSQL migration to verify transactional rollback, multiple offline devices, lost-response replay, stock shortage, and selected sale deletion without changing stock. Isolated browser checks confirmed a sale, receipt, reduced stock, retained reports with the preview server stopped, and sale selection/deletion against disposable mock data. Live Supabase end-to-end testing has not been performed.
 
 ## Supabase handoff notes
 

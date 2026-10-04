@@ -401,6 +401,8 @@ function App() {
   const [reportShiftFilter, setReportShiftFilter] = useState<ReportShiftFilter>('All')
   const [reportStartDate, setReportStartDate] = useState('')
   const [reportEndDate, setReportEndDate] = useState('')
+  const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
+  const [salesToDelete, setSalesToDelete] = useState<string[] | null>(null)
 
   const [syncStatus, setSyncStatus] = useState(offlineStore.status)
   const [pendingCount, setPendingCount] = useState(offlineStore.pendingCount)
@@ -511,6 +513,26 @@ function App() {
   const showMorningReport = reportShiftFilter === 'All' || reportShiftFilter === 'Morning Shift'
   const showAfternoonReport = reportShiftFilter === 'All' || reportShiftFilter === 'Afternoon Shift'
   const canManageProducts = cashierRole === 'Admin'
+  const selectedReportSales = filteredReportSales.filter(sale => selectedSaleIds.includes(sale.id))
+  const allReportSalesSelected = filteredReportSales.length > 0 && selectedReportSales.length === filteredReportSales.length
+
+  const renderSaleRow = (sale: Sale, showShift = false) => (
+    <div className="selectable-sale" key={sale.id}>
+      {canManageProducts && (
+        <input type="checkbox" aria-label={`Select sale ${sale.id}`} checked={selectedSaleIds.includes(sale.id)}
+          onChange={event => setSelectedSaleIds(current => event.target.checked
+            ? [...new Set([...current, sale.id])] : current.filter(id => id !== sale.id))} />
+      )}
+      <button className={showShift ? 'sale-row' : 'sale-row shift-sale-row'} onClick={() => setLastReceipt(sale)} type="button">
+        <strong title={sale.id}>{sale.id}</strong>
+        <span>{sale.patient}</span>
+        <span>{sale.payment}</span>
+        {showShift && <span>{sale.shift ?? 'Not recorded'}</span>}
+        <span>{new Date(sale.createdAt).toLocaleString()}</span>
+        <b>{formatMoney(sale.total)}</b>
+      </button>
+    </div>
+  )
 
   const filteredInventory = inventory.filter((item) => {
     const value = `${item.name} ${item.generic} ${item.category} ${item.batch} ${item.location}`.toLowerCase()
@@ -564,6 +586,19 @@ function App() {
     link.download = 'purela-backup-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json'
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  const deleteSelectedSales = () => {
+    if (!canManageProducts || !salesToDelete?.length) return
+    const deletedIds = new Set(salesToDelete)
+    const currentSales = offlineStore.read<SaleRow>('sales')
+    const remaining = currentSales.filter(sale => !deletedIds.has(sale.id))
+    if (!saveChanges({ sales: remaining })) return
+    if (lastReceipt && deletedIds.has(lastReceipt.id)) setLastReceipt(null)
+    setSelectedSaleIds(current => current.filter(id => !deletedIds.has(id)))
+    setSalesToDelete(null)
+    const deletedCount = currentSales.length - remaining.length
+    setToast(`${deletedCount} ${deletedCount === 1 ? 'sale' : 'sales'} deleted. Stock unchanged; deletions sync when connected.`)
   }
 
   const restoreBackup = async (file?: File) => {
@@ -1451,6 +1486,21 @@ function App() {
                   <p>Sales are saved on this device and uploaded when connected. Check sync status before clearing browser data.</p>
                 </div>
               </div>
+              {canManageProducts && (
+                <div className="sales-selection-toolbar">
+                  <label>
+                    <input type="checkbox" checked={allReportSalesSelected} disabled={!filteredReportSales.length}
+                      onChange={event => setSelectedSaleIds(event.target.checked ? filteredReportSales.map(sale => sale.id) : [])} />
+                    Select all filtered sales
+                  </label>
+                  <span>{selectedReportSales.length} selected</span>
+                  <button className="secondary" disabled={!selectedReportSales.length} type="button" onClick={() => setSelectedSaleIds([])}>Clear selection</button>
+                  <button className="secondary danger-action" disabled={!selectedReportSales.length} type="button"
+                    onClick={() => setSalesToDelete(selectedReportSales.map(sale => sale.id))}>
+                    <Trash2 size={18} />Delete selected
+                  </button>
+                </div>
+              )}
               <div className="shift-records">
                 {showMorningReport && (
                   <div className="shift-record">
@@ -1463,15 +1513,7 @@ function App() {
                     </div>
                     <div className="sales-list">
                       {morningSales.length > 0 ? (
-                        morningSales.map((sale) => (
-                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                            <strong>{sale.id}</strong>
-                            <span>{sale.patient}</span>
-                            <span>{sale.payment}</span>
-                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                            <b>{formatMoney(sale.total)}</b>
-                          </button>
-                        ))
+                        morningSales.map(sale => renderSaleRow(sale))
                       ) : (
                         <div className="empty-shift-record">No morning shift sales recorded for this report filter.</div>
                       )}
@@ -1490,15 +1532,7 @@ function App() {
                     </div>
                     <div className="sales-list">
                       {afternoonSales.length > 0 ? (
-                        afternoonSales.map((sale) => (
-                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                            <strong>{sale.id}</strong>
-                            <span>{sale.patient}</span>
-                            <span>{sale.payment}</span>
-                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                            <b>{formatMoney(sale.total)}</b>
-                          </button>
-                        ))
+                        afternoonSales.map(sale => renderSaleRow(sale))
                       ) : (
                         <div className="empty-shift-record">No afternoon shift sales recorded for this report filter.</div>
                       )}
@@ -1516,16 +1550,7 @@ function App() {
                       <b>{formatMoney(otherShiftSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
                     </div>
                     <div className="sales-list">
-                      {otherShiftSales.map((sale) => (
-                        <button className="sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
-                          <strong>{sale.id}</strong>
-                          <span>{sale.patient}</span>
-                          <span>{sale.payment}</span>
-                          <span>{sale.shift ?? 'Not recorded'}</span>
-                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
-                          <b>{formatMoney(sale.total)}</b>
-                        </button>
-                      ))}
+                      {otherShiftSales.map(sale => renderSaleRow(sale, true))}
                     </div>
                   </div>
                 )}
@@ -1595,6 +1620,20 @@ function App() {
           </section>
         )}
       </main>
+
+      {salesToDelete && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirm sale deletion">
+          <div className="receipt-modal">
+            <h2>Delete {salesToDelete.length} selected {salesToDelete.length === 1 ? 'sale' : 'sales'}?</h2>
+            <p>These sales will be removed from reports and deleted from the cloud when connected. This cannot be undone in the app. Stock will not be restored.</p>
+            <div className="modal-actions">
+              <button className="secondary" type="button" onClick={() => setSalesToDelete(null)}>Cancel</button>
+              <button className="secondary" type="button" onClick={exportBackup}><Download size={18} />Export backup</button>
+              <button className="primary danger-action" type="button" onClick={deleteSelectedSales}><Trash2 size={18} />Delete sales</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showProductModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add product dashboard">
