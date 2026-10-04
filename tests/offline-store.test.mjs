@@ -23,6 +23,34 @@ const cloud = () => {
   }
 }
 
+test('duplicate batch conflicts pause automatic uploads, retain data, and retry after editing', async () => {
+  const store = new OfflineStore(memory(), empty()), remote = cloud()
+  store.replace({ products: [{ id: 1, batch: 'DUPLICATE' }], sales: [{ id: 'sale-1' }] })
+  const write = remote.upsert
+  let attempts = 0
+  remote.upsert = async (table, row) => {
+    if (table === 'products') {
+      attempts++
+      if (row.batch === 'DUPLICATE') throw Object.assign(new Error('duplicate batch'), { code: '23505' })
+    }
+    await write(table, row)
+  }
+  await store.sync(remote, true)
+  await store.sync(remote, true)
+  assert.equal(attempts, 1)
+  assert.equal(store.pendingCount, 1)
+  assert.equal(store.read('products')[0].batch, 'DUPLICATE')
+  assert.equal(remote.data.sales.length, 1)
+  assert.match(store.status, /needs attention/)
+  await store.sync(remote, true, true)
+  assert.equal(attempts, 2)
+  store.replace({ products: [{ id: 1, batch: 'UNIQUE' }] })
+  await store.sync(remote, true)
+  assert.equal(attempts, 4)
+  assert.equal(store.pendingCount, 0)
+  assert.equal(remote.data.products[0].batch, 'UNIQUE')
+})
+
 test('offline sale and stock survive restart, reconnect, and cleared local storage after sync', async () => {
   const disk = memory(), remote = cloud()
   let store = new OfflineStore(disk, empty())

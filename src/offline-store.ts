@@ -2,9 +2,10 @@ export const tables = ['products', 'customers', 'prescriptions', 'sales'] as con
 export type Table = typeof tables[number]
 export type Row = { id: number | string; [key: string]: unknown }
 type Data = Record<Table, Row[]>
-type Change = { table: Table; id: Row['id']; row: Row | null; version: number }
-type Snapshot = { version: 1; revision: number; data: Data; pending: Change[] }
+export type Change = { table: Table; id: Row['id']; row: Row | null; version: number; stockDelta?: number }
+type Snapshot = { version: 1; revision: number; deviceId?: string; data: Data; pending: Change[] }
 export interface Transport {
+  batch?(changes: Change[], deviceId: string): Promise<void>
   upsert(table: Table, row: Row): Promise<void>
   remove(table: Table, id: Row['id']): Promise<void>
   read(table: Table): Promise<Row[]>
@@ -18,6 +19,7 @@ export class OfflineStore {
   private state: Snapshot
   private running: Promise<void> | null = null
   private syncRequested = false
+  private conflicts = new Map<number, string>()
   private listeners = new Set<() => void>()
   status = 'Waiting to sync'
   private storage: Pick<Storage, 'getItem' | 'setItem'>
@@ -43,13 +45,30 @@ export class OfflineStore {
       }
       this.commit(this.state)
     }
+    if (!this.state.deviceId) {
+      this.commit({ ...this.state, deviceId: crypto.randomUUID() })
+    }
   }
 
   read<T>(table: Table): T[] { return structuredClone(this.state.data[table]) as T[] }
   get pendingCount() { return this.state.pending.length }
+  refreshFromStorage() {
+    const saved = this.storage.getItem(storeKey)
+    if (saved && !same(JSON.parse(saved), this.state)) {
+      this.state = JSON.parse(saved)
+      this.conflicts.clear()
+      this.emit()
+    }
+  }
   subscribe(listener: () => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private emit() { this.listeners.forEach(listener => listener()) }
   private commit(next: Snapshot) {
+    const saved = this.storage.getItem(storeKey)
+    if (saved && this.state && JSON.parse(saved).revision > this.state.revision) {
+      this.state = JSON.parse(saved)
+      this.emit()
+      throw new Error('Another tab changed local data. Retry your action with the refreshed records.')
+    }
     try { this.storage.setItem(storeKey, JSON.stringify(next)) }
     catch (error) {
       this.status = 'Storage unavailable or full. Changes were not saved; export a backup before continuing.'
@@ -69,12 +88,25 @@ export class OfflineStore {
       const after = new Map(rows.map(row => [row.id, row]))
       for (const id of new Set([...before.keys(), ...after.keys()])) {
         if (same(before.get(id), after.get(id))) continue
-        next.pending = next.pending.filter(change => change.table !== table || change.id !== id)
-        next.pending.push({ table, id, row: after.get(id) ?? null, version: ++next.revision })
+        const row = after.get(id) ?? null
+        const previous = before.get(id)
+        if (table === 'products' && row && previous?.batch !== row.batch) {
+          next.pending = next.pending.map(change => change.table === table && change.id === id && change.row
+            ? { ...change, row: { ...change.row, batch: row.batch } } : change)
+        }
+        // Keep product operations in order: a lost response may already have
+        // applied an earlier stock delta in the cloud.
+        if (table !== 'products' || !row) {
+          next.pending = next.pending.filter(change => change.table !== table || change.id !== id)
+        }
+        next.pending.push({ table, id, row, version: ++next.revision,
+          ...(table === 'products' && row && previous
+            ? { stockDelta: Number(row.stock) - Number(previous.stock) } : {}) })
       }
       next.data[table] = structuredClone(rows)
     }
     this.commit(next)
+    this.conflicts.clear()
   }
 
   backup() { return JSON.stringify(this.state, null, 2) }
@@ -111,11 +143,13 @@ export class OfflineStore {
     this.commit(next)
   }
 
-  sync(transport: Transport | null, online: boolean): Promise<void> {
+  sync(transport: Transport | null, online: boolean, retryConflicts = false): Promise<void> {
+    if (retryConflicts) this.conflicts.clear()
     if (this.running) {
       this.syncRequested = true
       return this.running
     }
+    this.refreshFromStorage()
     if (!transport || !online) {
       this.status = !transport ? 'Cloud not configured — export a backup' : 'Offline — changes saved on this device'
       this.emit()
@@ -144,13 +178,44 @@ export class OfflineStore {
         if (a.row && !b.row) return 1
         return (a.row ? 1 : -1) * (tables.indexOf(a.table) - tables.indexOf(b.table))
       })
-      for (const change of changes) {
+      if (transport.batch && changes.length) {
+        const blocked = changes.find(change => this.conflicts.has(change.version))
+        if (blocked) {
+          errors.push(this.conflicts.get(blocked.version)!)
+        } else {
+          try {
+            await transport.batch(changes, this.state.deviceId!)
+            const versions = new Set(changes.map(change => change.version))
+            const next = structuredClone(this.state)
+            next.pending = next.pending.filter(change => !versions.has(change.version))
+            this.commit(next)
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            errors.push(message)
+            if (typeof error === 'object' && error !== null && 'code' in error &&
+              ['23505', '23503', '23514', 'PT409', 'PGRST202', '42501'].includes(String(error.code))) {
+              // Editing any member of a rejected atomic batch permits a new attempt.
+              this.conflicts.set(changes[changes.length - 1].version, message)
+            }
+          }
+        }
+      }
+      for (const change of transport.batch ? [] : changes) {
         if (!this.state.pending.some(item => item.version === change.version)) continue
+        const conflict = this.conflicts.get(change.version)
+        if (conflict) {
+          errors.push(conflict)
+          continue
+        }
         try {
           if (change.row) await transport.upsert(change.table, change.row)
           else await transport.remove(change.table, change.id)
         } catch (error) {
-          errors.push(`${change.table}: ${error instanceof Error ? error.message : String(error)}`)
+          const message = `${change.table}: ${error instanceof Error ? error.message : String(error)}`
+          if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {
+            this.conflicts.set(change.version, message)
+          }
+          errors.push(message)
           continue
         }
         const next = structuredClone(this.state)
@@ -178,7 +243,10 @@ export class OfflineStore {
       })
       this.commit(next)
       if (errors.length) {
-        this.status = `Automatic sync will retry — local changes kept. ${errors[0]}`
+        const hasConflict = next.pending.some(change => this.conflicts.has(change.version))
+        this.status = hasConflict
+          ? `Sync needs attention — local changes kept. ${errors[0]} Edit the conflicting record, then save; use Sync Now to retry.`
+          : `Automatic sync will retry — local changes kept. ${errors[0]}`
       } else if (this.pendingCount) {
         continue
       } else {

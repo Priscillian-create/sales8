@@ -1287,6 +1287,9 @@ button.customer-card:hover {
 }
 
 @media print {
+  .receipt-modal button {
+    display: none;
+  }
   .sidebar,
   .workspace,
   .modal-backdrop {
@@ -1577,6 +1580,10 @@ button.customer-card:hover {
   font-size: 12px;
   overflow-wrap: anywhere;
   color: #0f766e;
+}
+.receipt-modal h2,
+.sale-row strong {
+  overflow-wrap: anywhere;
 }
 .metric-strip.inventory-summary {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));

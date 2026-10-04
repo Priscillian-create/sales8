@@ -1,4 +1,4 @@
-const CACHE_NAME = 'purela-pharmacy-pos-v4'
+const CACHE_NAME = 'purela-pharmacy-pos-v5'
 const APP_SHELL = ['./', './manifest.webmanifest', './favicon.svg', './supabase-config.js']
 
 self.addEventListener('install', (event) => {
@@ -27,6 +27,12 @@ self.addEventListener('fetch', (event) => {
   if (event.request.mode !== 'navigate' && !asset) return
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME)
+    const cached = await cache.match(event.request)
+    if (cached) return cached
+    if (event.request.mode === 'navigate') {
+      const shell = await cache.match('./')
+      if (shell) return shell
+    }
     try {
       const response = await fetch(event.request)
       if (response.ok) {
@@ -35,8 +41,6 @@ self.addEventListener('fetch', (event) => {
       }
       return response
     } catch {
-      const cached = await cache.match(event.request)
-      if (cached) return cached
       if (event.request.mode === 'navigate') {
         const shell = await cache.match('./')
         if (shell) return shell

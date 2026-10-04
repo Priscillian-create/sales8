@@ -43,6 +43,7 @@ import {
 } from 'recharts'
 import { isSupabaseConfigured, supabase } from './supabase'
 import { OfflineStore } from './offline-store'
+import { offlineAccess, rememberAccess } from './offline-auth'
 import type { Transport, Row } from './offline-store'
 import './App.css'
 
@@ -258,10 +259,13 @@ const formatDateInput = (date: Date) => {
   return localDate.toISOString().slice(0, 10)
 }
 
-const nextOfflineSafeId = () => Date.now() + Math.floor(Math.random() * 1000)
+const nextOfflineSafeId = () => {
+  const random = crypto.getRandomValues(new Uint32Array(2))
+  return (random[0] & 0x1fffff) * 0x100000000 + random[1]
+}
 
 const generateBatchNumber = () => {
-  const randomPart = Math.random().toString(36).slice(2, 6).toUpperCase()
+  const randomPart = crypto.randomUUID().slice(0, 13).toUpperCase()
   return `PUR-${new Date().getFullYear()}-${randomPart}`
 }
 
@@ -324,9 +328,28 @@ const offlineStore = new OfflineStore(window.localStorage, {
 }, readStored('purela.pendingDeletes', {}))
 
 const transport: Transport | null = supabase ? {
+  async batch(changes, deviceId) {
+    const { error } = await supabase!.rpc('sync_pos_changes', { changes, device_id: deviceId })
+      .abortSignal(AbortSignal.timeout(30000))
+    if (error) {
+      const message = error.code === 'PGRST202'
+        ? 'Install supabase.offline-sync.sql in Supabase to enable transactional sync. Local changes are preserved.'
+        : error.code === '23505' && error.message.includes('products_batch_key')
+          ? 'A batch number already exists. Edit the duplicate batch in Inventory.'
+          : error.code === '23514'
+            ? 'Cloud stock is insufficient or a record is invalid. Review inventory and pending sales before retrying.'
+            : error.message
+      throw Object.assign(new Error(message), { code: error.code })
+    }
+  },
   async upsert(table, row) {
     const { error } = await supabase!.from(table).upsert(row, { onConflict: 'id' }).abortSignal(AbortSignal.timeout(15000))
-    if (error) throw new Error(error.message)
+    if (error) {
+      const message = table === 'products' && error.code === '23505' && error.message.includes('products_batch_key')
+        ? `A batch number already exists in cloud inventory. Change the duplicate product's batch number or edit the existing product.`
+        : error.message
+      throw Object.assign(new Error(message), { code: error.code })
+    }
   },
   async remove(table, id) {
     const { error } = await supabase!.from(table).delete().eq('id', id).abortSignal(AbortSignal.timeout(15000))
@@ -343,20 +366,23 @@ const transport: Transport | null = supabase ? {
   },
 } : null
 
-const syncNow = () => offlineStore.sync(transport, navigator.onLine)
+const syncNow = (retryConflicts = false) => navigator.locks
+  ? navigator.locks.request('purela-pos-sync', { ifAvailable: true }, lock => lock
+    ? offlineStore.sync(transport, navigator.onLine, retryConflicts) : Promise.resolve())
+  : offlineStore.sync(transport, navigator.onLine, retryConflicts)
 
 function App() {
   const [inventory, setInventory] = useState<Medicine[]>(() => offlineStore.read<Medicine>('products'))
   const [customers, setCustomers] = useState<Customer[]>(() => offlineStore.read<Customer>('customers'))
   const [prescriptions, setPrescriptions] = useState<Prescription[]>(() => offlineStore.read<PrescriptionRow>('prescriptions').map(rowToPrescription))
   const [sales, setSales] = useState<Sale[]>(() => offlineStore.read<SaleRow>('sales').map(rowToSale))
-  const [cart, setCart] = useState<CartLine[]>([])
+  const [cart, setCart] = useState<CartLine[]>(() => readStored('purela.cart.v1', []))
   const [activeTab, setActiveTab] = useState<TabLabel>('Register')
   const [query, setQuery] = useState('')
   const [inventoryQuery, setInventoryQuery] = useState('')
   const [payment, setPayment] = useState('Cash')
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | 'walk-in'>('walk-in')
-  const [lastReceipt, setLastReceipt] = useState<Sale | null>(null)
+  const [lastReceipt, setLastReceipt] = useState<Sale | null>(() => offlineStore.read<SaleRow>('sales').map(rowToSale).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null)
   const [toast, setToast] = useState('Ready for sale')
   const [showProductModal, setShowProductModal] = useState(false)
   const [editingProductId, setEditingProductId] = useState<number | null>(null)
@@ -378,6 +404,10 @@ function App() {
 
   const [syncStatus, setSyncStatus] = useState(offlineStore.status)
   const [pendingCount, setPendingCount] = useState(offlineStore.pendingCount)
+  useEffect(() => {
+    try { writeStored('purela.cart.v1', cart) }
+    catch { queueMicrotask(() => setToast('The draft cart could not be saved. Device storage is unavailable or full.')) }
+  }, [cart])
 
   useEffect(() => {
     const refresh = () => {
@@ -390,16 +420,18 @@ function App() {
     }
     const unsubscribe = offlineStore.subscribe(refresh)
     const handleSync = () => { void syncNow() }
+    const handleStorage = () => offlineStore.refreshFromStorage()
     refresh()
     handleSync()
     const handleVisible = () => {
       if (document.visibilityState === 'visible') handleSync()
     }
-    const timer = window.setInterval(handleVisible, 5000)
+    const timer = window.setInterval(handleVisible, 15000)
     document.addEventListener('visibilitychange', handleVisible)
     window.addEventListener('online', handleSync)
     window.addEventListener('offline', handleSync)
     window.addEventListener('focus', handleSync)
+    window.addEventListener('storage', handleStorage)
     // Request persistent storage where supported; an explicit clear still removes it.
     void navigator.storage?.persist?.().catch(() => false)
     const channel = supabase?.channel('purela-pos-sync')
@@ -412,6 +444,7 @@ function App() {
       window.removeEventListener('online', handleSync)
       window.removeEventListener('offline', handleSync)
       window.removeEventListener('focus', handleSync)
+      window.removeEventListener('storage', handleStorage)
       if (channel) void supabase?.removeChannel(channel)
     }
   }, [])
@@ -439,14 +472,16 @@ function App() {
 
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId)
   const currentShift = getCurrentShift()
-  const subtotal = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.qty, 0), [cart])
-  const discount = subtotal > 50000 ? subtotal * 0.05 : 0
-  const total = subtotal - discount
+  const subtotal = useMemo(() => cart.reduce((sum, item) => sum + Math.round(item.price * 100) * item.qty, 0) / 100, [cart])
+  const discount = subtotal > 50000 ? Math.round(subtotal * 5) / 100 : 0
+  const total = Math.round((subtotal - discount) * 100) / 100
 
   const lowStock = inventory.filter((item) => item.stock <= item.reorder)
   const inventoryValue = inventory.reduce((sum, item) => sum + item.stock * item.price, 0)
   const inventoryUnits = inventory.reduce((sum, item) => sum + item.stock, 0)
-  const expiringSoon = inventory.filter((item) => item.expiry < '2027-01-01')
+  const expiryLimit = new Date()
+  expiryLimit.setDate(expiryLimit.getDate() + 90)
+  const expiringSoon = inventory.filter((item) => item.expiry <= formatDateInput(expiryLimit))
   const rxFilled = prescriptions.filter((rx) => rx.status === 'Filled' || rx.status === 'Released').length
   const filteredReportSales = useMemo(() => {
     const startDate = reportStartDate && reportEndDate && reportStartDate > reportEndDate ? reportEndDate : reportStartDate
@@ -488,16 +523,28 @@ function App() {
   })
 
   const salesData = useMemo(() => {
-    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-    return days.map((day, index) => {
-      const daySales = filteredReportSales.filter((_, saleIndex) => saleIndex % 7 === index)
+    const days = [...new Set(filteredReportSales.map(sale => formatDateInput(new Date(sale.createdAt))))].sort()
+    return days.map(day => {
+      const daySales = filteredReportSales.filter(sale => formatDateInput(new Date(sale.createdAt)) === day)
       return {
         day,
         sales: daySales.reduce((sum, sale) => sum + sale.total, 0),
-        scripts: prescriptions.filter((_, rxIndex) => rxIndex % 7 === index).length,
+        scripts: daySales.reduce((sum, sale) => sum + sale.items.filter(item => item.prescription).reduce((count, item) => count + item.qty, 0), 0),
       }
     })
-  }, [filteredReportSales, prescriptions])
+  }, [filteredReportSales])
+
+  const exportReport = () => {
+    const escapeCell = (value: string | number) => '"' + String(value).replace(/"/g, '""') + '"'
+    const rows = [['Receipt', 'Date', 'Patient', 'Cashier', 'Payment', 'Shift', 'Subtotal', 'Discount', 'Total'],
+      ...filteredReportSales.map(sale => [sale.id, sale.createdAt, sale.patient, sale.cashier, sale.payment, sale.shift, sale.subtotal, sale.discount, sale.total])]
+    const url = URL.createObjectURL(new Blob([rows.map(row => row.map(escapeCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `purela-sales-${formatDateInput(new Date())}.csv`
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
 
   const saveChanges = (updates: Parameters<OfflineStore['replace']>[0]) => {
     try {
@@ -521,9 +568,10 @@ function App() {
 
   const restoreBackup = async (file?: File) => {
     if (!file) return
-    if (!window.confirm('Restore this backup? Matching records will be replaced with backup values and queued for upload. Export your current data first.')) return
     try {
-      offlineStore.restore(await file.text())
+      const contents = await file.text()
+      if (!window.confirm('Restore this backup? Matching records will be replaced with backup values and queued for upload. Export your current data first.')) return
+      offlineStore.restore(contents)
       setToast('Backup restored on this device. Changes queued for sync.')
       void syncNow()
     } catch (error) {
@@ -532,6 +580,10 @@ function App() {
   }
 
   const addToCart = (medicine: Medicine) => {
+    if (medicine.expiry < formatDateInput(new Date())) {
+      setToast(`${medicine.name} is expired and cannot be sold.`)
+      return
+    }
     if (medicine.stock <= 0) {
       setToast(`${medicine.name} is out of stock.`)
       return
@@ -581,17 +633,17 @@ function App() {
     }
 
     const stockIssue = cart.find((line) => {
-      const medicine = inventory.find((item) => item.id === line.id)
-      return !medicine || line.qty > medicine.stock
+      const medicine = offlineStore.read<Medicine>('products').find((item) => item.id === line.id)
+      return !medicine || !Number.isInteger(line.qty) || line.qty <= 0 || line.qty > medicine.stock || medicine.expiry < formatDateInput(new Date())
     })
 
     if (stockIssue) {
-      setToast(`${stockIssue.name} does not have enough stock.`)
+      setToast(`${stockIssue.name} is unavailable, expired, or has insufficient stock. Review the cart.`)
       return
     }
 
     const sale: Sale = {
-      id: `SALE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
+      id: `SALE-${crypto.randomUUID()}`,
       patient: selectedCustomer?.name ?? 'Walk-in customer',
       cashier: cashierName,
       payment,
@@ -697,13 +749,18 @@ function App() {
       return
     }
 
-    if (Number.isNaN(stock) || stock < 0 || Number.isNaN(reorder) || reorder < 0 || Number.isNaN(price) || price <= 0) {
+    if (!Number.isInteger(stock) || stock < 0 || !Number.isInteger(reorder) || reorder < 0 || !Number.isFinite(price) || price <= 0) {
       setFieldPopup(['Price must be above 0', 'Stock and reorder level must be 0 or above'])
       setToast('Correct the product number fields.')
       return
     }
 
     const batchNumber = medicineForm.batch.trim() || generateBatchNumber()
+    if (inventory.some(item => item.id !== editingProductId && item.batch === batchNumber)) {
+      setFieldPopup(['Batch number already exists. Edit the existing product or enter a different batch number.'])
+      setToast('Duplicate batch number. Product was not saved.')
+      return
+    }
 
     const medicine: Medicine = {
       id: editingProductId ?? nextOfflineSafeId(),
@@ -734,15 +791,15 @@ function App() {
 
   const addCustomer = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!customerForm.name || !customerForm.phone) {
+    if (!customerForm.name.trim() || !customerForm.phone.trim()) {
       setToast('Customer name and phone are required.')
       return
     }
 
     const customer: Customer = {
       id: nextOfflineSafeId(),
-      name: customerForm.name,
-      phone: customerForm.phone,
+      name: customerForm.name.trim(),
+      phone: customerForm.phone.trim(),
       plan: customerForm.plan || 'Private pay',
       allergies: customerForm.allergies || 'None recorded',
       last: 'New profile',
@@ -779,6 +836,7 @@ function App() {
     const fallback = { name: cashierDisplayName(loginId), role: 'Cashier' }
 
     if (!supabase) return fallback
+    if (!navigator.onLine) return offlineAccess(loginId, password)
 
     if (loginId.includes('@')) {
       const email = loginId.toLowerCase()
@@ -799,7 +857,7 @@ function App() {
 
       return {
         name: cashierDisplayName(metadataName || profile?.name || email),
-        role: normalizeRole(metadataRole || profile?.role),
+        role: normalizeRole(profile?.role || metadataRole),
       }
     }
 
@@ -809,13 +867,10 @@ function App() {
       .ilike('name', loginId)
       .maybeSingle()
 
-    if (profileResult.error || !profileResult.data) return fallback
+    if (profileResult.error || !profileResult.data) return null
 
     const profile = profileResult.data as ProfileRow
-    return {
-      name: cashierDisplayName(profile.name || profile.email || loginId),
-      role: normalizeRole(profile.role),
-    }
+    return resolveCashierAccess(profile.email, password)
   }
 
   const loginCashier = async (event: FormEvent<HTMLFormElement>) => {
@@ -827,10 +882,16 @@ function App() {
       return
     }
 
-    const access = await resolveCashierAccess(loginId, loginForm.password)
+    let access
+    try {
+      access = await resolveCashierAccess(loginId, loginForm.password)
+    } catch {
+      setToast('Login could not connect. When offline, use the same login last verified on this device.')
+      return
+    }
 
     if (!access) {
-      setToast('Supabase login failed. Check email and password.')
+      setToast(navigator.onLine ? 'Login failed. Check email and password.' : 'Offline login requires a successful online login on this device within the past 7 days, using the same login and password.')
       return
     }
 
@@ -839,6 +900,10 @@ function App() {
     writeStored('purela.cashierName', access.name)
     writeStored('purela.cashierRole', access.role)
     setIsLoggedIn(true)
+    if (supabase && navigator.onLine) {
+      try { await rememberAccess(loginId, loginForm.password, access) }
+      catch { setToast('Logged in, but offline login could not be saved on this device.'); return }
+    }
     setLoginForm({ ...emptyLoginForm, name: access.name })
     setToast(`${access.name} logged in as ${access.role}.`)
   }
@@ -900,11 +965,11 @@ function App() {
             <div className="login-form-grid">
               <label>
                 <span>Cashier Name or Email</span>
-                <input autoFocus placeholder="Enter Supabase email or cashier name" value={loginForm.name} onChange={(event) => setLoginForm({ ...loginForm, name: event.target.value })} />
+                <input autoFocus autoComplete="username" placeholder="Enter Supabase email or cashier name" value={loginForm.name} onChange={(event) => setLoginForm({ ...loginForm, name: event.target.value })} />
               </label>
               <label>
                 <span>Password</span>
-                <input placeholder="Enter password" type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} />
+                <input placeholder="Enter password" type="password" autoComplete="current-password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} />
               </label>
             </div>
 
@@ -1286,7 +1351,7 @@ function App() {
                   <h2>Sales Report Filter</h2>
                   <p>Select a shift and date period to view previous sales records.</p>
                 </div>
-                <Filter size={20} />
+                <button className="secondary" onClick={exportReport} type="button"><Download size={18} />Export CSV</button>
               </div>
               <div className="report-filter-grid">
                 <label>
@@ -1368,7 +1433,7 @@ function App() {
                 </AreaChart>
               </ChartPanel>
 
-              <ChartPanel title="Prescription Volume" description="Current prescription workflow load.">
+              <ChartPanel title="Prescription Units Sold" description="Prescription quantities in completed sales.">
                 <BarChart data={salesData}>
                   <CartesianGrid stroke="#e6e8eb" vertical={false} />
                   <XAxis dataKey="day" axisLine={false} tickLine={false} />
@@ -1500,7 +1565,7 @@ function App() {
                   event.target.value = ''
                 }} />
               </label>
-              <button className="secondary full" onClick={() => { void syncNow() }} type="button">Sync Now</button>
+              <button className="secondary full" onClick={() => { void syncNow(true) }} type="button">Sync Now</button>
               <button className="secondary full" onClick={clearProducts} type="button">Clear Products</button>
             </div>
 
