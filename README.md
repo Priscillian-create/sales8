@@ -1,70 +1,88 @@
 # PURELA PHARMACY POS
 
-A professional pharmacy point-of-sale front end built with React, TypeScript, Vite, Supabase, Lucide icons, and Recharts.
+An installable offline pharmacy point-of-sale app built with React, TypeScript, Vite, Lucide icons, and Recharts.
 
-## Features included
+## Offline Mode
+
+PURELA PHARMACY now runs without Supabase or any paid online database. Products, customers, prescriptions, sales, reports, cashier name, and receipt history are saved on the installed computer in the browser's local app storage.
+
+The app can be installed as a PWA from the browser. Once installed, sales can continue without internet.
+
+## Staff Login
+
+Use these local accounts on the installed POS:
+
+- Admin: username `admin`, password `admin123`
+- Cashier: username `cashier`, password `cashier123`
+
+Admin can add, edit, delete, and clear products. Cashier can use the sales register, receipts, customers, prescriptions, and reports without product management controls.
+
+## Backup and Moving to Another System
+
+Use **Settings > Export Data Backup** to download a JSON backup file. Keep this file somewhere safe, such as a flash drive, external disk, or cloud folder.
+
+To move to another computer:
+
+1. Open/install the app on the new computer.
+2. Go to **Settings**.
+3. Choose **Restore Data Backup**.
+4. Select the latest exported JSON backup file.
+5. Confirm that products, customers, prescriptions, sales, and reports appear.
+
+Export a backup at the end of each business day. Browser storage can be lost if Windows, the browser, or a cleaner app clears site data.
+
+## Features Included
 
 - PURELA PHARMACY branding with Naira pricing
-- Top-right Add Product button that opens a full product dashboard popup
+- Install button for app-style use on a POS computer
+- Local Admin and Cashier login with cashier name on receipts
 - Working register workflow with medicine search, cart quantities, discounts, payment method, stock validation, and receipt generation
-- Checkout updates inventory counts and writes a sale into browser local storage
+- Checkout updates inventory counts and writes sales into the local database
 - Prescription-aware product flags, patient attachment requirements, and a status queue
-- Patient profiles with insurance, allergy, refill, phone, and consultation signals
-- Inventory management for stock, batch, supplier, shelf location, reorder level, expiry risk, stock adjustments, and popup product creation
-- Customer creation and immediate attachment to the active sale
-- Sales history and prescription analytics generated from working local data
-- Admin sales selection and confirmed deletion in Reports, including offline deletion sync; deleting records does not restore stock
-- Supabase-ready client module and SQL schema
-- Responsive layout for desktop counters and smaller devices
+- Customer profiles with insurance, allergy, refill, phone, and consultation signals
+- Inventory management for stock, batch, supplier, shelf location, reorder level, expiry risk, stock adjustments, product edit/delete, and popup product creation
+- Reports with shift and date filters for Morning Shift and Afternoon Shift
+- Backup and restore for transferring records to another system
 
-## Run locally
+## Run Locally
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Connect Supabase
+## Build
 
-1. Run `supabase.schema.sql` in your Supabase SQL editor.
-2. Run `supabase.offline-sync.sql` to enable transactional uploads and durable retry receipts.
-3. Copy `.env.example` to `.env`.
-4. Add your `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`.
-5. Restart the dev server.
+```bash
+npm run build
+```
 
-The supplied `public/supabase-config.js` also supports runtime configuration. The app saves changes locally and queues them for upload to Supabase. The migration above is required; without it, queued changes stay on the device and sync displays a setup message. See [OFFLINE-UPDATE.md](OFFLINE-UPDATE.md) for the upgrade procedure and limitations.
+Deploy or copy the `dist` folder to the computer that will run the POS.
 
-## Offline data fix
+## Deploy on Netlify
 
-- Products, customers, prescriptions, sales, and pending changes share one durable local snapshot.
-- Checkout saves the sale, customer update, and stock reduction in one local write. If storage fails, checkout does not report success.
-- Only changed records upload. A queued batch commits in one database transaction. Failed uploads remain queued, and durable operation receipts make retries idempotent. An older response cannot acknowledge a newer change.
-- Products and customers upload before prescriptions. Deletions persist even when the final product is removed.
-- Changes upload immediately. Startup, reconnect, focus, returning to a visible tab, realtime subscription/reconnection, and realtime notifications trigger sync. A 15-second timer refreshes visible apps even if realtime is unavailable. Settings retains Sync Now as a manual retry.
-- Reads time out after 15 seconds and transactional uploads after 30 seconds. A rejected batch remains pending in full; validation conflicts pause uploads until edited or manually retried. Incoming records still refresh, and failed table reads preserve that table's local cache.
-- Remote reads are paginated. Responses fetched before a local edit are discarded. The service worker no longer caches database responses.
-- Clear Products preserves sales and customers. It requires Admin access and confirmation.
-- Settings includes Export Data Backup and Restore Data Backup. Backup files contain business/customer data; keep them in a safe location outside browser storage.
+This project includes `netlify.toml`, so Netlify can deploy it directly from GitHub.
 
-## Upgrade and recovery
+1. Push this repository to GitHub.
+2. Open Netlify and choose **Add new site > Import an existing project**.
+3. Select the GitHub repository.
+4. Use these settings:
+   - Build command: `npm run build`
+   - Publish directory: `dist`
+5. Deploy the site.
 
-1. Keep the same hosting address and browser profile to retain existing offline data. Do not clear browser storage during the upgrade.
-2. Run `supabase.offline-sync.sql` in Supabase, then run `npm ci` and `npm run build` and deploy the resulting `dist` contents.
-3. Close old app tabs. Open the updated app online and reload once so the updated service worker can cache the current assets for offline use.
-4. Existing local products, customers, prescriptions, sales, and pending deletions migrate automatically on first launch. The legacy keys are retained but are no longer used after migration.
-5. In Settings, export a backup, then choose Sync Now. Wait for **All changes synced to cloud** with no pending changes before clearing browser data.
-6. If storage was cleared after successful sync, opening the same configured app online reloads records from Supabase. If unsent records were cleared, use Restore Data Backup. Without an exported backup or a server copy, erased offline records cannot be recovered.
+After deployment, open the Netlify link in the POS computer browser and click **Install App**.
 
-An internet connection alone does not confirm upload: database configuration, permissions, and validation must also succeed. Sync errors are shown with their actual messages. Persistent browser storage is requested where supported, but this cannot prevent explicit clearing of site data.
-
-Use one active POS tab per browser profile. Where supported, browser locks serialize tab uploads and stale tab edits are rejected. New stock changes use deltas so offline device deductions accumulate; other record fields still use last-uploaded values. Both local checkout and cloud upload are atomic. Insufficient cloud stock requires reconciliation and keeps the batch pending. Cashier preferences and cart drafts remain device-local. Offline login requires a successful online login on that device within seven days.
+Because this is offline/local mode, each browser/device keeps its own database. Use **Settings > Export Data Backup** and **Restore Data Backup** when moving records to another computer.
 
 ## Verification
 
-Run `npm test`, `npm run build`, and `npm run lint`.
+Run:
 
-The 29 regression tests cover offline restart/reconnect, interrupted uploads, overlapping edits, stale reads, deletions, foreign-key ordering, migration, storage quota failure, backup restore, service-worker API exclusions, password verification, stale tabs, and record ID generation when the newer UUID API is unavailable. PGlite executes the PostgreSQL migration to verify transactional rollback, multiple offline devices, lost-response replay, stock shortage, and selected sale deletion without changing stock. Isolated browser checks confirmed checkout without randomUUID and with a failing sync lock, receipt creation, reduced stock, visible validation errors, retained reports with the preview server stopped, and sale selection/deletion against disposable mock data. Live Supabase end-to-end testing has not been performed.
+```bash
+npm test
+npm run lint
+npm run build
+```
 
-## Supabase handoff notes
-
-The schema includes products, customers, prescriptions, sales, and audit logs. It also includes starter data and permissive development RLS policies for anon/authenticated access. Tighten those policies before production use.
+The tests cover local storage reliability, backup restore/validation, service-worker behavior, and the legacy sync engine used by older backups.

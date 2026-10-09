@@ -41,11 +41,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
-import { isSupabaseConfigured, supabase } from './supabase'
 import { OfflineStore } from './offline-store'
-import { offlineAccess, rememberAccess } from './offline-auth'
-import { createRecordId } from './record-id'
-import type { Transport, Row } from './offline-store'
 import './App.css'
 
 type BeforeInstallPromptEvent = Event & {
@@ -156,12 +152,6 @@ type SaleRow = {
   created_at: string
 }
 
-type ProfileRow = {
-  email: string
-  name: string | null
-  role: string | null
-}
-
 const initialInventory: Medicine[] = []
 
 const initialPrescriptions: Prescription[] = []
@@ -214,6 +204,11 @@ const emptyLoginForm: LoginForm = {
   password: '',
 }
 
+const localLoginAccounts = [
+  { username: 'admin', password: 'admin123', name: 'Admin', role: 'Admin' },
+  { username: 'cashier', password: 'cashier123', name: 'Cashier', role: 'Cashier' },
+] as const
+
 const statusFlow: Record<RxStatus, RxStatus> = {
   Insurance: 'Clinical check',
   'Clinical check': 'Verified',
@@ -260,13 +255,10 @@ const formatDateInput = (date: Date) => {
   return localDate.toISOString().slice(0, 10)
 }
 
-const nextOfflineSafeId = () => {
-  const random = crypto.getRandomValues(new Uint32Array(2))
-  return (random[0] & 0x1fffff) * 0x100000000 + random[1]
-}
+const nextOfflineSafeId = () => Date.now() + Math.floor(Math.random() * 1000)
 
 const generateBatchNumber = () => {
-  const randomPart = createRecordId().slice(0, 13).toUpperCase()
+  const randomPart = Math.random().toString(36).slice(2, 6).toUpperCase()
   return `PUR-${new Date().getFullYear()}-${randomPart}`
 }
 
@@ -326,74 +318,21 @@ const offlineStore = new OfflineStore(window.localStorage, {
   customers: readStored<Customer[]>('purela.customers', []),
   prescriptions: readStored<Prescription[]>('purela.clean.prescriptions', initialPrescriptions).map(prescriptionToRow),
   sales: readStored<Sale[]>('purela.clean.sales', initialSales).map(saleToRow),
-}, readStored('purela.pendingDeletes', {}))
-
-const transport: Transport | null = supabase ? {
-  async batch(changes, deviceId) {
-    const { error } = await supabase!.rpc('sync_pos_changes', { changes, device_id: deviceId })
-      .abortSignal(AbortSignal.timeout(30000))
-    if (error) {
-      const message = error.code === 'PGRST202'
-        ? 'Install supabase.offline-sync.sql in Supabase to enable transactional sync. Local changes are preserved.'
-        : error.code === '23505' && error.message.includes('products_batch_key')
-          ? 'A batch number already exists. Edit the duplicate batch in Inventory.'
-          : error.code === '23514'
-            ? 'Cloud stock is insufficient or a record is invalid. Review inventory and pending sales before retrying.'
-            : error.message
-      throw Object.assign(new Error(message), { code: error.code })
-    }
-  },
-  async upsert(table, row) {
-    const { error } = await supabase!.from(table).upsert(row, { onConflict: 'id' }).abortSignal(AbortSignal.timeout(15000))
-    if (error) {
-      const message = table === 'products' && error.code === '23505' && error.message.includes('products_batch_key')
-        ? `A batch number already exists in cloud inventory. Change the duplicate product's batch number or edit the existing product.`
-        : error.message
-      throw Object.assign(new Error(message), { code: error.code })
-    }
-  },
-  async remove(table, id) {
-    const { error } = await supabase!.from(table).delete().eq('id', id).abortSignal(AbortSignal.timeout(15000))
-    if (error) throw new Error(error.message)
-  },
-  async read(table) {
-    const rows: Row[] = []
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase!.from(table).select('*').order('id').range(from, from + 999).abortSignal(AbortSignal.timeout(15000))
-      if (error) throw new Error(error.message)
-      rows.push(...(data ?? []))
-      if (!data || data.length < 1000) return rows
-    }
-  },
-} : null
-
-const syncNow = async (retryConflicts = false) => {
-  try {
-    if (navigator.locks) {
-      await navigator.locks.request('purela-pos-sync', { ifAvailable: true }, lock => lock
-        ? offlineStore.sync(transport, navigator.onLine, retryConflicts) : Promise.resolve())
-    } else {
-      await offlineStore.sync(transport, navigator.onLine, retryConflicts)
-    }
-  } catch (error) {
-    offlineStore.reportSyncError(error)
-  }
-}
+}, readStored('purela.pendingDeletes', {}), { localOnly: true })
 
 function App() {
   const [inventory, setInventory] = useState<Medicine[]>(() => offlineStore.read<Medicine>('products'))
   const [customers, setCustomers] = useState<Customer[]>(() => offlineStore.read<Customer>('customers'))
   const [prescriptions, setPrescriptions] = useState<Prescription[]>(() => offlineStore.read<PrescriptionRow>('prescriptions').map(rowToPrescription))
   const [sales, setSales] = useState<Sale[]>(() => offlineStore.read<SaleRow>('sales').map(rowToSale))
-  const [cart, setCart] = useState<CartLine[]>(() => readStored('purela.cart.v1', []))
+  const [cart, setCart] = useState<CartLine[]>([])
   const [activeTab, setActiveTab] = useState<TabLabel>('Register')
   const [query, setQuery] = useState('')
   const [inventoryQuery, setInventoryQuery] = useState('')
   const [payment, setPayment] = useState('Cash')
   const [selectedCustomerId, setSelectedCustomerId] = useState<number | 'walk-in'>('walk-in')
-  const [lastReceipt, setLastReceipt] = useState<Sale | null>(() => offlineStore.read<SaleRow>('sales').map(rowToSale).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null)
+  const [lastReceipt, setLastReceipt] = useState<Sale | null>(null)
   const [toast, setToast] = useState('Ready for sale')
-  const [checkoutError, setCheckoutError] = useState('')
   const [showProductModal, setShowProductModal] = useState(false)
   const [editingProductId, setEditingProductId] = useState<number | null>(null)
   const [fieldPopup, setFieldPopup] = useState<string[]>([])
@@ -411,15 +350,8 @@ function App() {
   const [reportShiftFilter, setReportShiftFilter] = useState<ReportShiftFilter>('All')
   const [reportStartDate, setReportStartDate] = useState('')
   const [reportEndDate, setReportEndDate] = useState('')
-  const [selectedSaleIds, setSelectedSaleIds] = useState<string[]>([])
-  const [salesToDelete, setSalesToDelete] = useState<string[] | null>(null)
 
   const [syncStatus, setSyncStatus] = useState(offlineStore.status)
-  const [pendingCount, setPendingCount] = useState(offlineStore.pendingCount)
-  useEffect(() => {
-    try { writeStored('purela.cart.v1', cart) }
-    catch { queueMicrotask(() => setToast('The draft cart could not be saved. Device storage is unavailable or full.')) }
-  }, [cart])
 
   useEffect(() => {
     const refresh = () => {
@@ -428,36 +360,20 @@ function App() {
       setPrescriptions(offlineStore.read<PrescriptionRow>('prescriptions').map(rowToPrescription))
       setSales(offlineStore.read<SaleRow>('sales').map(rowToSale))
       setSyncStatus(offlineStore.status)
-      setPendingCount(offlineStore.pendingCount)
     }
     const unsubscribe = offlineStore.subscribe(refresh)
-    const handleSync = () => { void syncNow() }
-    const handleStorage = () => offlineStore.refreshFromStorage()
     refresh()
-    handleSync()
     const handleVisible = () => {
-      if (document.visibilityState === 'visible') handleSync()
+      if (document.visibilityState === 'visible') refresh()
     }
-    const timer = window.setInterval(handleVisible, 15000)
     document.addEventListener('visibilitychange', handleVisible)
-    window.addEventListener('online', handleSync)
-    window.addEventListener('offline', handleSync)
-    window.addEventListener('focus', handleSync)
-    window.addEventListener('storage', handleStorage)
+    window.addEventListener('focus', refresh)
     // Request persistent storage where supported; an explicit clear still removes it.
     void navigator.storage?.persist?.().catch(() => false)
-    const channel = supabase?.channel('purela-pos-sync')
-      .on('postgres_changes', { event: '*', schema: 'public' }, handleSync)
-      .subscribe((status) => { if (status === 'SUBSCRIBED') handleSync() })
     return () => {
       unsubscribe()
-      window.clearInterval(timer)
       document.removeEventListener('visibilitychange', handleVisible)
-      window.removeEventListener('online', handleSync)
-      window.removeEventListener('offline', handleSync)
-      window.removeEventListener('focus', handleSync)
-      window.removeEventListener('storage', handleStorage)
-      if (channel) void supabase?.removeChannel(channel)
+      window.removeEventListener('focus', refresh)
     }
   }, [])
 
@@ -484,16 +400,14 @@ function App() {
 
   const selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId)
   const currentShift = getCurrentShift()
-  const subtotal = useMemo(() => cart.reduce((sum, item) => sum + Math.round(item.price * 100) * item.qty, 0) / 100, [cart])
-  const discount = subtotal > 50000 ? Math.round(subtotal * 5) / 100 : 0
-  const total = Math.round((subtotal - discount) * 100) / 100
+  const subtotal = useMemo(() => cart.reduce((sum, item) => sum + item.price * item.qty, 0), [cart])
+  const discount = subtotal > 50000 ? subtotal * 0.05 : 0
+  const total = subtotal - discount
 
   const lowStock = inventory.filter((item) => item.stock <= item.reorder)
   const inventoryValue = inventory.reduce((sum, item) => sum + item.stock * item.price, 0)
   const inventoryUnits = inventory.reduce((sum, item) => sum + item.stock, 0)
-  const expiryLimit = new Date()
-  expiryLimit.setDate(expiryLimit.getDate() + 90)
-  const expiringSoon = inventory.filter((item) => item.expiry <= formatDateInput(expiryLimit))
+  const expiringSoon = inventory.filter((item) => item.expiry < '2027-01-01')
   const rxFilled = prescriptions.filter((rx) => rx.status === 'Filled' || rx.status === 'Released').length
   const filteredReportSales = useMemo(() => {
     const startDate = reportStartDate && reportEndDate && reportStartDate > reportEndDate ? reportEndDate : reportStartDate
@@ -523,26 +437,6 @@ function App() {
   const showMorningReport = reportShiftFilter === 'All' || reportShiftFilter === 'Morning Shift'
   const showAfternoonReport = reportShiftFilter === 'All' || reportShiftFilter === 'Afternoon Shift'
   const canManageProducts = cashierRole === 'Admin'
-  const selectedReportSales = filteredReportSales.filter(sale => selectedSaleIds.includes(sale.id))
-  const allReportSalesSelected = filteredReportSales.length > 0 && selectedReportSales.length === filteredReportSales.length
-
-  const renderSaleRow = (sale: Sale, showShift = false) => (
-    <div className="selectable-sale" key={sale.id}>
-      {canManageProducts && (
-        <input type="checkbox" aria-label={`Select sale ${sale.id}`} checked={selectedSaleIds.includes(sale.id)}
-          onChange={event => setSelectedSaleIds(current => event.target.checked
-            ? [...new Set([...current, sale.id])] : current.filter(id => id !== sale.id))} />
-      )}
-      <button className={showShift ? 'sale-row' : 'sale-row shift-sale-row'} onClick={() => setLastReceipt(sale)} type="button">
-        <strong title={sale.id}>{sale.id}</strong>
-        <span>{sale.patient}</span>
-        <span>{sale.payment}</span>
-        {showShift && <span>{sale.shift ?? 'Not recorded'}</span>}
-        <span>{new Date(sale.createdAt).toLocaleString()}</span>
-        <b>{formatMoney(sale.total)}</b>
-      </button>
-    </div>
-  )
 
   const filteredInventory = inventory.filter((item) => {
     const value = `${item.name} ${item.generic} ${item.category} ${item.batch} ${item.location}`.toLowerCase()
@@ -555,36 +449,23 @@ function App() {
   })
 
   const salesData = useMemo(() => {
-    const days = [...new Set(filteredReportSales.map(sale => formatDateInput(new Date(sale.createdAt))))].sort()
-    return days.map(day => {
-      const daySales = filteredReportSales.filter(sale => formatDateInput(new Date(sale.createdAt)) === day)
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    return days.map((day, index) => {
+      const daySales = filteredReportSales.filter((_, saleIndex) => saleIndex % 7 === index)
       return {
         day,
         sales: daySales.reduce((sum, sale) => sum + sale.total, 0),
-        scripts: daySales.reduce((sum, sale) => sum + sale.items.filter(item => item.prescription).reduce((count, item) => count + item.qty, 0), 0),
+        scripts: prescriptions.filter((_, rxIndex) => rxIndex % 7 === index).length,
       }
     })
-  }, [filteredReportSales])
-
-  const exportReport = () => {
-    const escapeCell = (value: string | number) => '"' + String(value).replace(/"/g, '""') + '"'
-    const rows = [['Receipt', 'Date', 'Patient', 'Cashier', 'Payment', 'Shift', 'Subtotal', 'Discount', 'Total'],
-      ...filteredReportSales.map(sale => [sale.id, sale.createdAt, sale.patient, sale.cashier, sale.payment, sale.shift, sale.subtotal, sale.discount, sale.total])]
-    const url = URL.createObjectURL(new Blob([rows.map(row => row.map(escapeCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8' }))
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `purela-sales-${formatDateInput(new Date())}.csv`
-    link.click()
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-  }
+  }, [filteredReportSales, prescriptions])
 
   const saveChanges = (updates: Parameters<OfflineStore['replace']>[0]) => {
     try {
       offlineStore.replace(updates)
-      void syncNow()
       return true
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : 'Could not save changes. Export a backup before continuing.')
+    } catch {
+      setToast('Could not save changes. Device storage is unavailable or full. Export a backup before continuing.')
       return false
     }
   }
@@ -598,37 +479,18 @@ function App() {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  const deleteSelectedSales = () => {
-    if (!canManageProducts || !salesToDelete?.length) return
-    const deletedIds = new Set(salesToDelete)
-    const currentSales = offlineStore.read<SaleRow>('sales')
-    const remaining = currentSales.filter(sale => !deletedIds.has(sale.id))
-    if (!saveChanges({ sales: remaining })) return
-    if (lastReceipt && deletedIds.has(lastReceipt.id)) setLastReceipt(null)
-    setSelectedSaleIds(current => current.filter(id => !deletedIds.has(id)))
-    setSalesToDelete(null)
-    const deletedCount = currentSales.length - remaining.length
-    setToast(`${deletedCount} ${deletedCount === 1 ? 'sale' : 'sales'} deleted. Stock unchanged; deletions sync when connected.`)
-  }
-
   const restoreBackup = async (file?: File) => {
     if (!file) return
+    if (!window.confirm('Restore this backup? Matching local records will be replaced with backup values. Export your current data first.')) return
     try {
-      const contents = await file.text()
-      if (!window.confirm('Restore this backup? Matching records will be replaced with backup values and queued for upload. Export your current data first.')) return
-      offlineStore.restore(contents)
-      setToast('Backup restored on this device. Changes queued for sync.')
-      void syncNow()
+      offlineStore.restore(await file.text())
+      setToast('Backup restored on this device.')
     } catch (error) {
       setToast(error instanceof Error ? error.message : 'Backup could not be restored.')
     }
   }
 
   const addToCart = (medicine: Medicine) => {
-    if (medicine.expiry < formatDateInput(new Date())) {
-      setToast(`${medicine.name} is expired and cannot be sold.`)
-      return
-    }
     if (medicine.stock <= 0) {
       setToast(`${medicine.name} is out of stock.`)
       return
@@ -666,78 +528,57 @@ function App() {
   }
 
   const completeSale = () => {
-    setCheckoutError('')
-    const fail = (message: string) => {
-      setCheckoutError(message)
-      setToast(message)
+    if (cart.length === 0) {
+      setToast('Add at least one medicine to complete a sale.')
+      return
     }
-    try {
-      if (cart.length === 0) {
-        fail('Add at least one medicine to complete a sale.')
-        return
-      }
 
-      const currentInventory = offlineStore.read<Medicine>('products')
-      const currentCustomers = offlineStore.read<Customer>('customers')
-      const currentSales = offlineStore.read<SaleRow>('sales')
-      const customer = currentCustomers.find(item => item.id === selectedCustomerId)
-
-      const rxLine = cart.find(item => currentInventory.find(medicine => medicine.id === item.id)?.prescription)
-      if (rxLine && !customer) {
-        fail('Attach a patient profile before selling prescription medicine.')
-        return
-      }
-
-      const stockIssue = cart.find((line) => {
-        const medicine = currentInventory.find((item) => item.id === line.id)
-        return !medicine || !Number.isInteger(line.qty) || line.qty <= 0 || line.qty > medicine.stock || medicine.expiry < formatDateInput(new Date())
-      })
-
-      if (stockIssue) {
-        fail(`${stockIssue.name} is unavailable, expired, or has insufficient stock. Review the cart.`)
-        return
-      }
-
-      if (cart.some(item => !Number.isFinite(Number(item.price)) || Number(item.price) <= 0) || !Number.isFinite(total)) {
-        fail('A cart item has an invalid price. Remove it and add it again from Inventory.')
-        return
-      }
-
-      const sale: Sale = {
-        id: `SALE-${createRecordId()}`,
-        patient: customer?.name ?? 'Walk-in customer',
-        cashier: cashierName,
-        payment,
-        shift: currentShift,
-        subtotal,
-        discount,
-        total,
-        items: cart,
-        createdAt: new Date().toISOString(),
-      }
-
-      const nextInventory = currentInventory.map((item) => {
-        const soldLine = cart.find((line) => line.id === item.id)
-        return soldLine ? { ...item, stock: item.stock - soldLine.qty } : item
-      })
-
-      const nextCustomers = customer
-        ? currentCustomers.map((item) =>
-            item.id === customer.id
-              ? { ...item, last: `Purchased ${cart[0].name}`, status: 'Served today' }
-              : item,
-          )
-        : currentCustomers
-
-      // Checkout success depends on the local atomic write, not cloud availability.
-      offlineStore.replace({ products: nextInventory, customers: nextCustomers, sales: [saleToRow(sale), ...currentSales] })
-      setCart([])
-      setLastReceipt(sale)
-      setToast(`Sale ${sale.id} completed successfully.`)
-      void syncNow()
-    } catch (error) {
-      fail(error instanceof Error ? error.message : 'Sale could not be saved. Your cart is unchanged. Export a backup before retrying.')
+    const rxLine = cart.find((item) => item.prescription)
+    if (rxLine && !selectedCustomer) {
+      setToast('Attach a patient profile before selling prescription medicine.')
+      return
     }
+
+    const stockIssue = cart.find((line) => {
+      const medicine = inventory.find((item) => item.id === line.id)
+      return !medicine || line.qty > medicine.stock
+    })
+
+    if (stockIssue) {
+      setToast(`${stockIssue.name} does not have enough stock.`)
+      return
+    }
+
+    const sale: Sale = {
+      id: `SALE-${Date.now()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
+      patient: selectedCustomer?.name ?? 'Walk-in customer',
+      cashier: cashierName,
+      payment,
+      shift: currentShift,
+      subtotal,
+      discount,
+      total,
+      items: cart,
+      createdAt: new Date().toISOString(),
+    }
+
+    const nextInventory = inventory.map((item) => {
+      const soldLine = cart.find((line) => line.id === item.id)
+      return soldLine ? { ...item, stock: item.stock - soldLine.qty } : item
+    })
+
+    const nextCustomers = selectedCustomer
+      ? customers.map((customer) =>
+          customer.id === selectedCustomer.id
+            ? { ...customer, last: `Purchased ${cart[0].name}`, status: 'Served today' }
+            : customer,
+        )
+      : customers
+
+    if (!saveChanges({ products: nextInventory, customers: nextCustomers, sales: [sale, ...sales].map(saleToRow) })) return
+    setCart([])
+    setLastReceipt(sale)
+    setToast(`Sale ${sale.id} completed successfully.`)
   }
 
   const openAddProduct = () => {
@@ -815,18 +656,13 @@ function App() {
       return
     }
 
-    if (!Number.isInteger(stock) || stock < 0 || !Number.isInteger(reorder) || reorder < 0 || !Number.isFinite(price) || price <= 0) {
+    if (Number.isNaN(stock) || stock < 0 || Number.isNaN(reorder) || reorder < 0 || Number.isNaN(price) || price <= 0) {
       setFieldPopup(['Price must be above 0', 'Stock and reorder level must be 0 or above'])
       setToast('Correct the product number fields.')
       return
     }
 
     const batchNumber = medicineForm.batch.trim() || generateBatchNumber()
-    if (inventory.some(item => item.id !== editingProductId && item.batch === batchNumber)) {
-      setFieldPopup(['Batch number already exists. Edit the existing product or enter a different batch number.'])
-      setToast('Duplicate batch number. Product was not saved.')
-      return
-    }
 
     const medicine: Medicine = {
       id: editingProductId ?? nextOfflineSafeId(),
@@ -857,15 +693,15 @@ function App() {
 
   const addCustomer = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!customerForm.name.trim() || !customerForm.phone.trim()) {
+    if (!customerForm.name || !customerForm.phone) {
       setToast('Customer name and phone are required.')
       return
     }
 
     const customer: Customer = {
       id: nextOfflineSafeId(),
-      name: customerForm.name.trim(),
-      phone: customerForm.phone.trim(),
+      name: customerForm.name,
+      phone: customerForm.phone,
       plan: customerForm.plan || 'Private pay',
       allergies: customerForm.allergies || 'None recorded',
       last: 'New profile',
@@ -894,49 +730,19 @@ function App() {
     if (!window.confirm('Delete all products and their prescriptions? Sales and customers will be kept.')) return
     if (!saveChanges({ products: [], prescriptions: [] })) return
     setCart([])
-    setToast('Products cleared. Deletions will sync when connected.')
+    setToast('Products cleared from this local device.')
   }
 
-  const resolveCashierAccess = async (identifier: string, password: string) => {
-    const loginId = identifier.trim()
-    const fallback = { name: cashierDisplayName(loginId), role: 'Cashier' }
+  const resolveCashierAccess = (identifier: string, password: string) => {
+    const loginId = identifier.trim().toLowerCase()
+    const loginPassword = password.trim()
+    const account = localLoginAccounts.find((item) => item.username === loginId && item.password === loginPassword)
+    if (!account) return null
 
-    if (!supabase) return fallback
-    if (!navigator.onLine) return offlineAccess(loginId, password)
-
-    if (loginId.includes('@')) {
-      const email = loginId.toLowerCase()
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({ email, password })
-
-      if (authError || !authData.user) return null
-
-      const metadata = authData.user.user_metadata ?? {}
-      const profileResult = await supabase
-        .from('profiles')
-        .select('email,name,role')
-        .eq('email', email)
-        .maybeSingle()
-
-      const profile = profileResult.error ? null : (profileResult.data as ProfileRow | null)
-      const metadataName = typeof metadata.name === 'string' ? metadata.name : typeof metadata.full_name === 'string' ? metadata.full_name : ''
-      const metadataRole = typeof metadata.role === 'string' ? metadata.role : ''
-
-      return {
-        name: cashierDisplayName(metadataName || profile?.name || email),
-        role: normalizeRole(profile?.role || metadataRole),
-      }
+    return {
+      name: account.name,
+      role: normalizeRole(account.role),
     }
-
-    const profileResult = await supabase
-      .from('profiles')
-      .select('email,name,role')
-      .ilike('name', loginId)
-      .maybeSingle()
-
-    if (profileResult.error || !profileResult.data) return null
-
-    const profile = profileResult.data as ProfileRow
-    return resolveCashierAccess(profile.email, password)
   }
 
   const loginCashier = async (event: FormEvent<HTMLFormElement>) => {
@@ -948,16 +754,10 @@ function App() {
       return
     }
 
-    let access
-    try {
-      access = await resolveCashierAccess(loginId, loginForm.password)
-    } catch {
-      setToast('Login could not connect. When offline, use the same login last verified on this device.')
-      return
-    }
+    const access = resolveCashierAccess(loginId, loginForm.password)
 
     if (!access) {
-      setToast(navigator.onLine ? 'Login failed. Check email and password.' : 'Offline login requires a successful online login on this device within the past 7 days, using the same login and password.')
+      setToast('Invalid login. Use admin/admin123 or cashier/cashier123.')
       return
     }
 
@@ -966,18 +766,11 @@ function App() {
     writeStored('purela.cashierName', access.name)
     writeStored('purela.cashierRole', access.role)
     setIsLoggedIn(true)
-    if (supabase && navigator.onLine) {
-      try { await rememberAccess(loginId, loginForm.password, access) }
-      catch { setToast('Logged in, but offline login could not be saved on this device.'); return }
-    }
     setLoginForm({ ...emptyLoginForm, name: access.name })
     setToast(`${access.name} logged in as ${access.role}.`)
   }
 
   const logoutCashier = () => {
-    if (supabase) {
-      void supabase.auth.signOut()
-    }
     setIsLoggedIn(false)
     setLoginForm({ ...emptyLoginForm, name: cashierName })
     setToast('Enter cashier name and password to login.')
@@ -1024,19 +817,32 @@ function App() {
 
           <div className="login-panel">
             <div>
-              <h2>Cashier Login</h2>
-              <p>Sign in to open the sales register, inventory, prescriptions, customers, and reports.</p>
+              <h2>Staff Login</h2>
+              <p>Use Admin for adding products and Cashier for point-of-sale work.</p>
             </div>
 
             <div className="login-form-grid">
               <label>
-                <span>Cashier Name or Email</span>
-                <input autoFocus autoComplete="username" placeholder="Enter Supabase email or cashier name" value={loginForm.name} onChange={(event) => setLoginForm({ ...loginForm, name: event.target.value })} />
+                <span>Username</span>
+                <input autoFocus placeholder="admin or cashier" value={loginForm.name} onChange={(event) => setLoginForm({ ...loginForm, name: event.target.value })} />
               </label>
               <label>
                 <span>Password</span>
-                <input placeholder="Enter password" type="password" autoComplete="current-password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} />
+                <input placeholder="Enter password" type="password" value={loginForm.password} onChange={(event) => setLoginForm({ ...loginForm, password: event.target.value })} />
               </label>
+            </div>
+
+            <div className="login-accounts" aria-label="Local staff accounts">
+              <div>
+                <strong>Admin</strong>
+                <span>Username: admin</span>
+                <span>Password: admin123</span>
+              </div>
+              <div>
+                <strong>Cashier</strong>
+                <span>Username: cashier</span>
+                <span>Password: cashier123</span>
+              </div>
             </div>
 
             {toast.includes('login') && <p className="login-warning">{toast}</p>}
@@ -1095,8 +901,8 @@ function App() {
 
         <div className="secure-panel">
           <ShieldCheck size={20} />
-          <strong>Compliance mode</strong>
-          <span>Role-based access, audit logs, prescription checks, and controlled item prompts.</span>
+          <strong>Offline mode</strong>
+          <span>Local records, receipt history, prescription checks, and backup/restore controls.</span>
         </div>
       </aside>
 
@@ -1107,7 +913,7 @@ function App() {
             <h1>{moduleCopy[activeTab].title}</h1>
           </div>
           <div className="topbar-actions">
-            <span role="status" className="sync-status">{syncStatus}{pendingCount > 0 ? ' · ' + pendingCount + ' pending' : ''}</span>
+            <span role="status" className="sync-status">{syncStatus}</span>
             {!isAppInstalled && (
               <button className="install-top" onClick={installApp} type="button">
                 <Download size={18} />
@@ -1263,7 +1069,6 @@ function App() {
                   Complete Sale
                 </button>
               </div>
-              {checkoutError && <p role="alert" className="checkout-error">{checkoutError}</p>}
             </div>
           </section>
         )}
@@ -1418,7 +1223,7 @@ function App() {
                   <h2>Sales Report Filter</h2>
                   <p>Select a shift and date period to view previous sales records.</p>
                 </div>
-                <button className="secondary" onClick={exportReport} type="button"><Download size={18} />Export CSV</button>
+                <Filter size={20} />
               </div>
               <div className="report-filter-grid">
                 <label>
@@ -1500,7 +1305,7 @@ function App() {
                 </AreaChart>
               </ChartPanel>
 
-              <ChartPanel title="Prescription Units Sold" description="Prescription quantities in completed sales.">
+              <ChartPanel title="Prescription Volume" description="Current prescription workflow load.">
                 <BarChart data={salesData}>
                   <CartesianGrid stroke="#e6e8eb" vertical={false} />
                   <XAxis dataKey="day" axisLine={false} tickLine={false} />
@@ -1515,24 +1320,9 @@ function App() {
               <div className="panel-heading">
                 <div>
                   <h2>Sales History</h2>
-                  <p>Sales are saved on this device and uploaded when connected. Check sync status before clearing browser data.</p>
+                  <p>Sales are saved on this computer. Export a backup before moving systems or clearing browser data.</p>
                 </div>
               </div>
-              {canManageProducts && (
-                <div className="sales-selection-toolbar">
-                  <label>
-                    <input type="checkbox" checked={allReportSalesSelected} disabled={!filteredReportSales.length}
-                      onChange={event => setSelectedSaleIds(event.target.checked ? filteredReportSales.map(sale => sale.id) : [])} />
-                    Select all filtered sales
-                  </label>
-                  <span>{selectedReportSales.length} selected</span>
-                  <button className="secondary" disabled={!selectedReportSales.length} type="button" onClick={() => setSelectedSaleIds([])}>Clear selection</button>
-                  <button className="secondary danger-action" disabled={!selectedReportSales.length} type="button"
-                    onClick={() => setSalesToDelete(selectedReportSales.map(sale => sale.id))}>
-                    <Trash2 size={18} />Delete selected
-                  </button>
-                </div>
-              )}
               <div className="shift-records">
                 {showMorningReport && (
                   <div className="shift-record">
@@ -1545,7 +1335,15 @@ function App() {
                     </div>
                     <div className="sales-list">
                       {morningSales.length > 0 ? (
-                        morningSales.map(sale => renderSaleRow(sale))
+                        morningSales.map((sale) => (
+                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                            <strong>{sale.id}</strong>
+                            <span>{sale.patient}</span>
+                            <span>{sale.payment}</span>
+                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                            <b>{formatMoney(sale.total)}</b>
+                          </button>
+                        ))
                       ) : (
                         <div className="empty-shift-record">No morning shift sales recorded for this report filter.</div>
                       )}
@@ -1564,7 +1362,15 @@ function App() {
                     </div>
                     <div className="sales-list">
                       {afternoonSales.length > 0 ? (
-                        afternoonSales.map(sale => renderSaleRow(sale))
+                        afternoonSales.map((sale) => (
+                          <button className="sale-row shift-sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                            <strong>{sale.id}</strong>
+                            <span>{sale.patient}</span>
+                            <span>{sale.payment}</span>
+                            <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                            <b>{formatMoney(sale.total)}</b>
+                          </button>
+                        ))
                       ) : (
                         <div className="empty-shift-record">No afternoon shift sales recorded for this report filter.</div>
                       )}
@@ -1582,7 +1388,16 @@ function App() {
                       <b>{formatMoney(otherShiftSales.reduce((sum, sale) => sum + sale.total, 0))}</b>
                     </div>
                     <div className="sales-list">
-                      {otherShiftSales.map(sale => renderSaleRow(sale, true))}
+                      {otherShiftSales.map((sale) => (
+                        <button className="sale-row" key={sale.id} onClick={() => setLastReceipt(sale)} type="button">
+                          <strong>{sale.id}</strong>
+                          <span>{sale.patient}</span>
+                          <span>{sale.payment}</span>
+                          <span>{sale.shift ?? 'Not recorded'}</span>
+                          <span>{new Date(sale.createdAt).toLocaleString()}</span>
+                          <b>{formatMoney(sale.total)}</b>
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1596,23 +1411,23 @@ function App() {
             <div className="settings-panel">
               <div className="panel-heading">
                 <div>
-                  <h2>Supabase Connection</h2>
-                  <p>Database, authentication, and sync are ready for your project keys.</p>
+                  <h2>Local Database and Backup</h2>
+                  <p>This installed POS keeps products, customers, prescriptions, and sales on this computer.</p>
                 </div>
                 <BadgeCheck size={20} />
               </div>
               <div className="setting-list">
                 <div>
-                  <strong>Connection status</strong>
-                  <span>{isSupabaseConfigured ? 'Supabase environment variables detected.' : 'Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.'}</span>
+                  <strong>Storage mode</strong>
+                  <span>Offline local database. No Supabase subscription or internet connection is required for sales.</span>
                 </div>
                 <div>
-                  <strong>Database schema</strong>
-                  <span>Run supabase.schema.sql in Supabase SQL editor before wiring live reads and writes.</span>
+                  <strong>Backup file</strong>
+                  <span>Export a JSON backup at the end of the day and keep it on a flash drive, external disk, or cloud folder.</span>
                 </div>
                 <div>
-                  <strong>Local data mode</strong>
-                  <span>Offline changes stay on this device until uploaded. Clearing browser data before sync deletes unsent changes. Export a backup first.</span>
+                  <strong>Moving system</strong>
+                  <span>Install the app on the new computer, then restore the latest backup file to bring over records.</span>
                 </div>
               </div>
               <button className="secondary full" onClick={exportBackup} type="button">Export Data Backup</button>
@@ -1622,7 +1437,6 @@ function App() {
                   event.target.value = ''
                 }} />
               </label>
-              <button className="secondary full" onClick={() => { void syncNow(true) }} type="button">Sync Now</button>
               <button className="secondary full" onClick={clearProducts} type="button">Clear Products</button>
             </div>
 
@@ -1652,20 +1466,6 @@ function App() {
           </section>
         )}
       </main>
-
-      {salesToDelete && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Confirm sale deletion">
-          <div className="receipt-modal">
-            <h2>Delete {salesToDelete.length} selected {salesToDelete.length === 1 ? 'sale' : 'sales'}?</h2>
-            <p>These sales will be removed from reports and deleted from the cloud when connected. This cannot be undone in the app. Stock will not be restored.</p>
-            <div className="modal-actions">
-              <button className="secondary" type="button" onClick={() => setSalesToDelete(null)}>Cancel</button>
-              <button className="secondary" type="button" onClick={exportBackup}><Download size={18} />Export backup</button>
-              <button className="primary danger-action" type="button" onClick={deleteSelectedSales}><Trash2 size={18} />Delete sales</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showProductModal && (
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add product dashboard">

@@ -202,6 +202,14 @@ test('invalid backups leave existing data untouched', () => {
   assert.equal(store.backup(), before)
 })
 
+test('local-only mode saves records without creating sync backlog', () => {
+  const store = new OfflineStore(memory(), empty(), {}, { localOnly: true })
+  store.replace({ products: [{ id: 1, name: 'Paracetamol' }], sales: [{ id: 'sale-1' }] })
+  assert.equal(store.pendingCount, 0)
+  assert.equal(store.read('products')[0].name, 'Paracetamol')
+  assert.equal(JSON.parse(store.backup()).pending.length, 0)
+})
+
 test('a realtime event during an existing fetch triggers a follow-up fetch', async () => {
   const store = new OfflineStore(memory(), empty()), remote = cloud()
   const read = remote.read

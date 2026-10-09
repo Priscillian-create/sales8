@@ -86,6 +86,33 @@
   color: #1f2933;
 }
 
+.login-accounts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.login-accounts div {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e0e7ef;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.login-accounts strong {
+  color: #162536;
+  font-size: 13px;
+}
+
+.login-accounts span {
+  margin: 0;
+  color: #667789;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .login-warning {
   padding: 11px 12px;
   border-radius: 8px;
@@ -1362,6 +1389,7 @@ button.customer-card:hover {
   }
 
   .login-dashboard,
+  .login-accounts,
   .login-shifts {
     grid-template-columns: 1fr;
   }
