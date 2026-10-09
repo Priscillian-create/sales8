@@ -6,7 +6,6 @@ export type Row = { id: number | string; [key: string]: unknown }
 type Data = Record<Table, Row[]>
 export type Change = { table: Table; id: Row['id']; row: Row | null; version: number; stockDelta?: number }
 type Snapshot = { version: 1; revision: number; deviceId?: string; data: Data; pending: Change[] }
-type OfflineStoreOptions = { localOnly?: boolean }
 export interface Transport {
   batch?(changes: Change[], deviceId: string): Promise<void>
   upsert(table: Table, row: Row): Promise<void>
@@ -26,22 +25,15 @@ export class OfflineStore {
   private listeners = new Set<() => void>()
   status = 'Waiting to sync'
   private storage: Pick<Storage, 'getItem' | 'setItem'>
-  private localOnly: boolean
 
   constructor(storage: Pick<Storage, 'getItem' | 'setItem'>, initial: Data,
-    deleted: Partial<Record<Table, Array<Row['id']>>> = {}, options: OfflineStoreOptions = {}) {
+    deleted: Partial<Record<Table, Array<Row['id']>>> = {}) {
     this.storage = storage
-    this.localOnly = Boolean(options.localOnly)
-    if (this.localOnly) this.status = 'Local database ready'
     const saved = storage.getItem(storeKey)
     if (saved) {
       this.state = JSON.parse(saved)
       if (this.state.version !== 1 || !this.state.data || !Array.isArray(this.state.pending)) {
         throw new Error('Local data could not be opened. Preserve browser storage and restore a backup.')
-      }
-      if (this.localOnly && this.state.pending.length) {
-        this.state = { ...this.state, pending: [], revision: this.state.revision + 1 }
-        this.commit(this.state)
       }
     } else {
       this.state = { version: 1, revision: 0, data: { products: [], customers: [], prescriptions: [], sales: [] }, pending: [] }
@@ -50,7 +42,7 @@ export class OfflineStore {
         for (const id of deleted[table] ?? []) {
           this.state.data[table] = this.state.data[table].filter(row => row.id !== id)
           this.state.pending = this.state.pending.filter(change => change.table !== table || change.id !== id)
-          if (!this.localOnly) this.state.pending.push({ table, id, row: null, version: ++this.state.revision })
+          this.state.pending.push({ table, id, row: null, version: ++this.state.revision })
         }
       }
       this.commit(this.state)
@@ -61,7 +53,7 @@ export class OfflineStore {
   }
 
   read<T>(table: Table): T[] { return structuredClone(this.state.data[table]) as T[] }
-  get pendingCount() { return this.localOnly ? 0 : this.state.pending.length }
+  get pendingCount() { return this.state.pending.length }
   reportSyncError(error: unknown) {
     this.status = `Sync failed — changes kept on this device. ${error instanceof Error ? error.message : String(error)}`
     this.emit()
@@ -98,12 +90,6 @@ export class OfflineStore {
     for (const table of tables) {
       const rows = updates[table]
       if (!rows) continue
-      if (this.localOnly) {
-        next.data[table] = structuredClone(rows)
-        next.pending = []
-        next.revision += 1
-        continue
-      }
       const before = new Map(next.data[table].map(row => [row.id, row]))
       const after = new Map(rows.map(row => [row.id, row]))
       for (const id of new Set([...before.keys(), ...after.keys()])) {
@@ -153,11 +139,6 @@ export class OfflineStore {
     const next = structuredClone(this.state)
     for (const table of tables) {
       next.data[table] = updates[table]
-      if (this.localOnly) {
-        next.pending = []
-        next.revision += 1
-        continue
-      }
       const deletes = backup.pending.filter(change => change.table === table && change.row === null)
       const changes = [...updates[table].map(row => ({ id: row.id, row })), ...deletes]
       for (const change of changes) {
@@ -169,11 +150,6 @@ export class OfflineStore {
   }
 
   sync(transport: Transport | null, online: boolean, retryConflicts = false): Promise<void> {
-    if (this.localOnly) {
-      this.status = 'Local database ready'
-      this.emit()
-      return Promise.resolve()
-    }
     if (retryConflicts) this.conflicts.clear()
     if (this.running) {
       this.syncRequested = true
